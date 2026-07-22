@@ -1,0 +1,30 @@
+# Build output (the compiled binary)
+/nexus/nexus
+
+# Frontend
+nexus-vue/dist/
+nexus-vue/node_modules/
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+data/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/nexus/internal/static/dist/
+nexus/internal/static/dist/

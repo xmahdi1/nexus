@@ -1,0 +1,15 @@
+services:
+  nexus:
+    container_name: nexus
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:8080"
+    env_file:
+      - .env
+    volumes:
+      - nexus-data:/data
+      - ./.env:/app/.env
+
+volumes:
+  nexus-data:

@@ -1,0 +1,97 @@
+{
+  "app": {
+    "name": "Nexus",
+    "tagline": "Serververwaltung"
+  },
+  "nav": {
+    "dashboard": "Übersicht",
+    "servers": "Server",
+    "settings": "Einstellungen",
+    "logout": "Abmelden"
+  },
+  "auth": {
+    "signIn": "Anmelden",
+    "signInTo": "Bei Nexus anmelden",
+    "email": "E-Mail",
+    "password": "Passwort",
+    "emailPlaceholder": "du{'@'}firma.com",
+    "signingIn": "Anmelden...",
+    "welcome": "Willkommen zurück"
+  },
+  "dashboard": {
+    "title": "Übersicht",
+    "subtitle": "Übersicht aller Server",
+    "servers": "Server",
+    "online": "Online",
+    "offline": "Offline",
+    "connecting": "Verbinde"
+  },
+  "servers": {
+    "title": "Server",
+    "subtitle": "Verbundene Server verwalten",
+    "add": "Server hinzufügen",
+    "displayName": "Anzeigename",
+    "host": "Host / IP",
+    "port": "Port",
+    "username": "SSH-Benutzer",
+    "generateKey": "Schlüsselpaar erzeugen",
+    "publicKey": "Öffentlicher Schlüssel",
+    "save": "Speichern",
+    "cancel": "Abbrechen",
+    "empty": "Noch keine Server",
+    "emptyHint": "Füge deinen ersten Server hinzu",
+    "added": "Server hinzugefügt",
+    "copied": "Schlüssel kopiert"
+  },
+  "server": {
+    "tabs": {
+      "terminal": "Terminal",
+      "containers": "Container",
+      "compose": "Docker Compose",
+      "metrics": "Metriken"
+    },
+    "containers": {
+      "name": "Name",
+      "image": "Image",
+      "status": "Status",
+      "ports": "Ports",
+      "cpu": "CPU %",
+      "mem": "Speicher",
+      "actions": "Aktionen",
+      "start": "Start",
+      "stop": "Stop",
+      "restart": "Neustart",
+      "remove": "Entfernen",
+      "logs": "Logs anzeigen",
+      "empty": "Keine Container aktiv"
+    },
+    "metrics": {
+      "cpu": "CPU-Auslastung",
+      "ram": "Arbeitsspeicher",
+      "disk": "Festplatte"
+    },
+    "terminalHint": "Verbunden — Terminal bereit",
+    "logsTitle": "Container-Logs"
+  },
+  "settings": {
+    "title": "Einstellungen",
+    "subtitle": "Verwalte deine Einstellungen",
+    "language": "Sprache",
+    "theme": "Design",
+    "themeLight": "Hell",
+    "themeDark": "Dunkel",
+    "changePassword": "Passwort ändern",
+    "currentPassword": "Aktuelles Passwort",
+    "newPassword": "Neues Passwort",
+    "update": "Passwort aktualisieren",
+    "saved": "Gespeichert"
+  },
+  "status": {
+    "online": "Online",
+    "offline": "Offline",
+    "connecting": "Verbinde",
+    "running": "Aktiv",
+    "exited": "Beendet",
+    "paused": "Pausiert"
+  }
+}

@@ -1,0 +1,97 @@
+{
+  "app": {
+    "name": "Nexus",
+    "tagline": "Gestion de serveurs"
+  },
+  "nav": {
+    "dashboard": "Tableau de bord",
+    "servers": "Serveurs",
+    "settings": "Paramètres",
+    "logout": "Déconnexion"
+  },
+  "auth": {
+    "signIn": "Se connecter",
+    "signInTo": "Connexion à Nexus",
+    "email": "E-mail",
+    "password": "Mot de passe",
+    "emailPlaceholder": "vous{'@'}entreprise.com",
+    "signingIn": "Connexion...",
+    "welcome": "Bon retour"
+  },
+  "dashboard": {
+    "title": "Tableau de bord",
+    "subtitle": "Vue d'ensemble des serveurs",
+    "servers": "Serveurs",
+    "online": "En ligne",
+    "offline": "Hors ligne",
+    "connecting": "Connexion"
+  },
+  "servers": {
+    "title": "Serveurs",
+    "subtitle": "Gérez vos serveurs",
+    "add": "Ajouter un serveur",
+    "displayName": "Nom",
+    "host": "Hôte / IP",
+    "port": "Port",
+    "username": "Utilisateur SSH",
+    "generateKey": "Générer une paire de clés",
+    "publicKey": "Clé publique",
+    "save": "Enregistrer",
+    "cancel": "Annuler",
+    "empty": "Aucun serveur",
+    "emptyHint": "Ajoutez votre premier serveur",
+    "added": "Serveur ajouté",
+    "copied": "Clé copiée"
+  },
+  "server": {
+    "tabs": {
+      "terminal": "Terminal",
+      "containers": "Conteneurs",
+      "compose": "Docker Compose",
+      "metrics": "Métriques"
+    },
+    "containers": {
+      "name": "Nom",
+      "image": "Image",
+      "status": "Statut",
+      "ports": "Ports",
+      "cpu": "CPU %",
+      "mem": "Mémoire",
+      "actions": "Actions",
+      "start": "Démarrer",
+      "stop": "Arrêter",
+      "restart": "Redémarrer",
+      "remove": "Supprimer",
+      "logs": "Voir les logs",
+      "empty": "Aucun conteneur"
+    },
+    "metrics": {
+      "cpu": "Utilisation CPU",
+      "ram": "Mémoire",
+      "disk": "Disque"
+    },
+    "terminalHint": "Connecté — terminal prêt",
+    "logsTitle": "Logs du conteneur"
+  },
+  "settings": {
+    "title": "Paramètres",
+    "subtitle": "Gérez vos préférences",
+    "language": "Langue",
+    "theme": "Thème",
+    "themeLight": "Clair",
+    "themeDark": "Sombre",
+    "changePassword": "Changer le mot de passe",
+    "currentPassword": "Mot de passe actuel",
+    "newPassword": "Nouveau mot de passe",
+    "update": "Mettre à jour",
+    "saved": "Enregistré"
+  },
+  "status": {
+    "online": "En ligne",
+    "offline": "Hors ligne",
+    "connecting": "Connexion",
+    "running": "Actif",
+    "exited": "Arrêté",
+    "paused": "En pause"
+  }
+}

@@ -1,0 +1,95 @@
+{
+  "app": {
+    "name": "Nexus",
+    "tagline": "Server Management"
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "servers": "Servers",
+    "settings": "Settings",
+    "logout": "Log out"
+  },
+  "auth": {
+    "signInTo": "Sign in to your dashboard",
+    "password": "Password",
+    "passwordPlaceholder": "Enter your password",
+    "signIn": "Sign in",
+    "signingIn": "Signing in…",
+    "error": "Invalid credentials"
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "subtitle": "Overview of all your servers",
+    "servers": "Servers",
+    "online": "Online",
+    "offline": "Offline",
+    "connecting": "Connecting"
+  },
+  "servers": {
+    "title": "Servers",
+    "subtitle": "Manage your remote servers",
+    "add": "Add Server",
+    "added": "Server added",
+    "empty": "No servers yet",
+    "emptyHint": "Add a server to get started",
+    "displayName": "Display Name",
+    "host": "Host / IP",
+    "port": "Port",
+    "username": "SSH Username",
+    "generateKey": "Generate Key Pair",
+    "publicKey": "Public Key (add to ~/.ssh/authorized_keys)",
+    "copied": "Copied to clipboard",
+    "cancel": "Cancel",
+    "save": "Save Server"
+  },
+  "status": {
+    "online": "Online",
+    "offline": "Offline",
+    "connecting": "Connecting",
+    "running": "Running",
+    "exited": "Exited",
+    "paused": "Paused"
+  },
+  "server": {
+    "tabs": {
+      "terminal": "Terminal",
+      "containers": "Containers",
+      "compose": "Compose",
+      "metrics": "Metrics"
+    },
+    "terminalHint": "# Terminal will connect here once the backend is wired",
+    "metrics": {
+      "cpu": "CPU",
+      "ram": "Memory",
+      "disk": "Disk"
+    },
+    "containers": {
+      "name": "Name",
+      "image": "Image",
+      "status": "Status",
+      "ports": "Ports",
+      "cpu": "CPU",
+      "mem": "Memory",
+      "actions": "Actions",
+      "start": "Start",
+      "stop": "Stop",
+      "restart": "Restart",
+      "logs": "Logs",
+      "remove": "Remove",
+      "empty": "No containers found"
+    }
+  },
+  "settings": {
+    "title": "Settings",
+    "subtitle": "Preferences and account settings",
+    "language": "Language",
+    "theme": "Theme",
+    "themeLight": "Light",
+    "themeDark": "Dark",
+    "changePassword": "Change Password",
+    "currentPassword": "Current Password",
+    "newPassword": "New Password",
+    "update": "Update Password",
+    "saved": "Settings saved"
+  }
+}
