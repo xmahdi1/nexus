@@ -17,7 +17,6 @@ type ServicesHandler struct {
 }
 
 func NewServicesHandler(db *gorm.DB) *ServicesHandler {
-	db.AutoMigrate(&models.Service{})
 	return &ServicesHandler{db: db}
 }
 

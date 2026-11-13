@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -52,12 +53,7 @@ func ensureHistoryAppend(client *ssh.Client) {
 }
 
 func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(nexusauth.CookieName())
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if _, err := nexusauth.ValidateToken(cookie.Value, h.secret); err != nil {
+	if _, ok := nexusauth.FromContext(r.Context()); !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -132,10 +128,13 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(64 << 10)
+	defer nexusauth.WatchAccess(r, func() { conn.Close(); sess.Close() })()
 
 	var mu sync.Mutex
 	write := func(data []byte) {
 		mu.Lock()
+		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		conn.WriteMessage(websocket.BinaryMessage, data)
 		mu.Unlock()
 	}
@@ -156,6 +155,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		mu.Lock()
+		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		conn.WriteMessage(websocket.TextMessage, []byte("\r\n[session ended]\r\n"))
 		mu.Unlock()
 		conn.Close()
@@ -197,6 +197,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	sess.Close()
 	<-done
 	sess.Wait()
 }

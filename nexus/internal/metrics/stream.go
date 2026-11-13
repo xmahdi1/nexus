@@ -22,12 +22,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(nexusauth.CookieName())
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if _, err := nexusauth.ValidateToken(cookie.Value, h.encKey); err != nil {
+	if _, ok := nexusauth.FromContext(r.Context()); !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -44,6 +39,8 @@ func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(64 << 10)
+	defer nexusauth.WatchAccess(r, func() { conn.Close() })()
 
 	gone := make(chan struct{})
 	go func() {
@@ -56,6 +53,7 @@ func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	push := func() bool {
+		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		privKey, err := nexuscrypto.Decrypt(h.encKey, server.PrivateKeyEnc)
 		if err != nil {
 			return false
@@ -75,6 +73,15 @@ func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 			return true
 		}
 		defer sess.Close()
+		workDone := make(chan struct{})
+		go func() {
+			select {
+			case <-gone:
+				sess.Close()
+			case <-workDone:
+			}
+		}()
+		defer close(workDone)
 
 		out, err := sess.Output(metricsScript)
 		if err != nil && len(out) == 0 {

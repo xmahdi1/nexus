@@ -13,6 +13,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/xmahdi1/nexus/internal/api"
+	"github.com/xmahdi1/nexus/internal/auth"
 	"github.com/xmahdi1/nexus/internal/config"
 	"github.com/xmahdi1/nexus/internal/db"
 	"github.com/xmahdi1/nexus/internal/monitor"
@@ -24,6 +25,74 @@ import (
 var mountFrontend = func(r http.Handler, cfg *config.Config) http.Handler { return r }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "account-recovery" {
+		if err := runAccountRecovery(os.Args[2:], os.Stdout); err != nil {
+			log.Fatalf("local account recovery failed: %v", err)
+		}
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "owner-activate" {
+		if len(os.Args) != 3 {
+			log.Fatal("usage: nexus owner-activate USERNAME")
+		}
+		cfg, err := config.Load()
+		if err != nil {
+			log.Fatal(err)
+		}
+		database, err := db.Init(cfg.DBPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		connection, err := database.DB()
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer connection.Close()
+		if err := auth.ActivateOwner(database, cfg, os.Args[2]); err != nil {
+			log.Fatalf("owner activation failed: %v", err)
+		}
+		fmt.Println("Owner account login activated using current configured credentials and MFA. Existing sessions revoked. No workers started.")
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "owner-bootstrap" {
+		if err := runOwnerBootstrap(os.Args[2:], terminalPassword, os.Stdout); err != nil {
+			log.Fatalf("owner bootstrap failed: %v", err)
+		}
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "db-migrate" {
+		if len(os.Args) != 3 {
+			log.Fatal("usage: nexus db-migrate DATABASE.db")
+		}
+		database, err := db.Init(os.Args[2])
+		if err != nil {
+			log.Fatalf("migration failed: %v", err)
+		}
+		connection, err := database.DB()
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := connection.Close(); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println("Database migrations complete. No workers or HTTP listener started.")
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "db-backup" {
+		if len(os.Args) != 4 {
+			log.Fatal("usage: nexus db-backup SOURCE.db NEW-BACKUP.db")
+		}
+		if err := db.Backup(os.Args[2], os.Args[3]); err != nil {
+			log.Fatalf("backup failed: %v", err)
+		}
+		fmt.Println("Database backup created. Store the matching .env securely and separately.")
+		return
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "setup" {
 		runSetup()
 		return

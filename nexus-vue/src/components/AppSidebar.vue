@@ -4,7 +4,8 @@ import {computed, inject, ref} from 'vue'
 import {useRoute, useRouter} from 'vue-router'
 import {useI18n} from 'vue-i18n'
 import {Bookmark, LayoutDashboard, LogOut, Moon, Server, Settings as SettingsIcon, Sun} from '@lucide/vue'
-import {signOut} from '@/lib/auth'
+import {can, signOut} from '@/lib/auth'
+import {toast} from 'vue-sonner'
 import {applyTheme, getTheme, type Theme} from '@/lib/theme'
 
 const emit = defineEmits<{ close: [] }>()
@@ -19,7 +20,7 @@ const theme = ref<Theme>(getTheme())
 const navItems = computed(() => [
   {to: '/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard},
   {to: '/servers', label: t('nav.servers'), icon: Server},
-  {to: '/services', label: 'Services', icon: Bookmark},
+  ...(can('services.read') ? [{to: '/services', label: 'Services', icon: Bookmark}] : []),
   {to: '/settings', label: t('nav.settings'), icon: SettingsIcon},
 ])
 
@@ -34,8 +35,8 @@ function toggleTheme() {
 }
 
 async function handleLogout() {
-  await signOut()
-  router.push('/login')
+  try { await signOut(); router.push('/login') }
+  catch { toast.error('Could not revoke this session. Check the connection and try signing out again.') }
 }
 
 function handleNav() {

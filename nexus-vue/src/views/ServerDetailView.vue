@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import {can} from '@/lib/auth'
 import {nextTick, onMounted, onUnmounted, ref, watch} from 'vue'
 import {useRoute, useRouter} from 'vue-router'
 import {useI18n} from 'vue-i18n'
@@ -59,7 +60,9 @@ const tabs = [
   {key: 'firewall', label: 'Firewall', icon: ShieldCheck},
 ] as const
 
-const activeTab = ref<'terminal' | 'containers' | 'compose' | 'metrics' | 'files' | 'proxy' | 'apps' | 'cron' | 'tasks' | 'firewall'>('terminal')
+const tabPermissions: Record<string,string[]> = {terminal:['servers.terminal','servers.execute'],containers:['docker.read'],compose:['compose.read'],metrics:['metrics.read'],files:['files.list'],proxy:['proxy.read','proxy.manage'],apps:['deployments.read','templates.read'],cron:['jobs.read','logs.read'],tasks:['jobs.read','logs.read'],firewall:['firewall.read','firewall.manage']}
+const visibleTabs = tabs.filter(tab => tabPermissions[tab.key]!.every(permission => can(permission,serverId)))
+const activeTab = ref<'terminal' | 'containers' | 'compose' | 'metrics' | 'files' | 'proxy' | 'apps' | 'cron' | 'tasks' | 'firewall'>(visibleTabs[0]?.key ?? 'containers')
 const server = ref(store.list.find(s => s.id === serverId))
 const tagSaving = ref(false)
 const monitoredContainerIds = ref<Set<string>>(new Set())
@@ -448,7 +451,8 @@ onMounted(async () => {
       toast.error('Server not found')
     }
   }
-  nextTick(() => initFirstSession())
+  if (can('servers.terminal',serverId) && can('servers.execute',serverId)) nextTick(() => initFirstSession())
+  if (activeTab.value === 'containers') fetchContainers()
 })
 
 onUnmounted(() => destroyAllSessions())
@@ -477,13 +481,13 @@ watch(activeTab, tab => {
           <p :class="['text-sm text-muted-foreground font-mono truncate', activeTab === 'terminal' ? 'hidden sm:block' : '']">
             {{ server?.username }}@{{ server?.host }}:{{ server?.port }}</p>
           <div :class="['mt-2', activeTab === 'terminal' ? 'hidden sm:block' : '']">
-            <TagEditor v-if="server" :model-value="server.tags ?? ''" :disabled="tagSaving" @save="saveTags"/>
+            <TagEditor v-if="server && can('servers.update',serverId)" :model-value="server.tags ?? ''" :disabled="tagSaving" @save="saveTags"/>
           </div>
         </div>
       </div>
 
       <div class="flex border-b overflow-x-auto scrollbar-none">
-        <div class="flex items-center shrink-0">
+        <div v-if="visibleTabs.some(tab => tab.key === 'terminal')" class="flex items-center shrink-0">
           <button :class="['flex items-center gap-1.5 px-3 sm:px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors',
             activeTab === 'terminal' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground']"
                   @click="activeTab = 'terminal'">
@@ -513,7 +517,7 @@ watch(activeTab, tab => {
           </button>
         </div>
 
-        <button v-for="tab in tabs.filter(t => t.key !== 'terminal')" :key="tab.key"
+        <button v-for="tab in visibleTabs.filter(t => t.key !== 'terminal')" :key="tab.key"
                 :class="['flex items-center gap-1.5 px-3 sm:px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors shrink-0',
             activeTab === tab.key ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground']"
                 @click="activeTab = tab.key">
@@ -636,44 +640,44 @@ watch(activeTab, tab => {
               <tr v-if="expandedContainerId === c.id" class="border-b bg-muted/5">
                 <td colspan="5" class="px-4 py-3">
                   <div class="flex flex-wrap items-center gap-2">
-                    <Button v-if="getDbType(c.image)" size="sm" variant="outline"
+                    <Button v-if="getDbType(c.image) && can('docker.exec',serverId)" size="sm" variant="outline"
                             class="gap-1.5 h-7 text-xs text-violet-500" @click="dbExecContainer = c">
                       <Database class="h-3.5 w-3.5"/>
                       DB Query
                     </Button>
-                    <Button size="sm" variant="outline" class="gap-1.5 h-7 text-xs"
+                    <Button v-if="can('settings.manage',serverId)" size="sm" variant="outline" class="gap-1.5 h-7 text-xs"
                             :class="monitoredContainerIds.has(c.name) ? 'text-primary' : ''" @click="toggleMonitor(c)">
                       <Bell v-if="monitoredContainerIds.has(c.id)" class="h-3.5 w-3.5"/>
                       <BellOff v-else class="h-3.5 w-3.5"/>
                       {{ monitoredContainerIds.has(c.id) ? 'Unmonitor' : 'Monitor' }}
                     </Button>
-                    <Button size="sm" variant="outline" class="gap-1.5 h-7 text-xs" @click="openLogs(c)">
+                    <Button v-if="can('logs.read',serverId)" size="sm" variant="outline" class="gap-1.5 h-7 text-xs" @click="openLogs(c)">
                       <ScrollText class="h-3.5 w-3.5"/>
                       Logs
                     </Button>
-                    <Button size="sm" variant="outline" class="gap-1.5 h-7 text-xs text-blue-600"
+                    <Button v-if="can('proxy.manage',serverId)" size="sm" variant="outline" class="gap-1.5 h-7 text-xs text-blue-600"
                             @click="exposeContainer(c)">
                       <Globe class="h-3.5 w-3.5"/>
                       Expose
                     </Button>
-                    <Button v-if="(c as any).state !== 'running'" size="sm" variant="outline"
+                    <Button v-if="(c as any).state !== 'running' && can('docker.manage',serverId)" size="sm" variant="outline"
                             class="gap-1.5 h-7 text-xs text-green-600" :disabled="actionLoading[c.id]"
                             @click="containerAction(c.id, 'start', 'Start')">
                       <Play class="h-3.5 w-3.5"/>
                       Start
                     </Button>
-                    <Button v-if="(c as any).state === 'running'" size="sm" variant="outline"
+                    <Button v-if="(c as any).state === 'running' && can('docker.manage',serverId)" size="sm" variant="outline"
                             class="gap-1.5 h-7 text-xs text-yellow-600" :disabled="actionLoading[c.id]"
                             @click="containerAction(c.id, 'stop', 'Stop')">
                       <Square class="h-3.5 w-3.5"/>
                       Stop
                     </Button>
-                    <Button size="sm" variant="outline" class="gap-1.5 h-7 text-xs" :disabled="actionLoading[c.id]"
+                    <Button v-if="can('docker.manage',serverId)" size="sm" variant="outline" class="gap-1.5 h-7 text-xs" :disabled="actionLoading[c.id]"
                             @click="containerAction(c.id, 'restart', 'Restart')">
                       <RotateCcw class="h-3.5 w-3.5"/>
                       Restart
                     </Button>
-                    <Button size="sm" variant="outline"
+                    <Button v-if="can('docker.remove',serverId)" size="sm" variant="outline"
                             class="gap-1.5 h-7 text-xs text-destructive border-destructive/30"
                             :disabled="actionLoading[c.id]" @click="containerAction(c.id, 'remove', 'Remove')">
                       <Trash2 class="h-3.5 w-3.5"/>

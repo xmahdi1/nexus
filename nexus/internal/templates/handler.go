@@ -24,7 +24,6 @@ type Handler struct {
 }
 
 func NewHandler(db *gorm.DB, encKey []byte, pool *nexusssh.Pool) *Handler {
-	db.AutoMigrate(&models.DeployedApp{}, &models.CustomTemplate{})
 	return &Handler{db: db, encKey: encKey, pool: pool}
 }
 
@@ -75,7 +74,8 @@ func (h *Handler) ListDeployed(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if matched == nil {
-					h.db.Delete(&apps[i])
+					apps[i].Status = "unknown"
+					keep = append(keep, apps[i])
 					continue
 				}
 				newStatus := "stopped"

@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { toast } from 'vue-sonner'
 import { Search, Plus, Trash2, Loader2, Terminal, Package, ExternalLink, Pencil, X, RefreshCw } from '@lucide/vue'
 import { api } from '@/lib/api'
-import type { AppTemplate, DeployedApp } from '@/lib/api'
+import type { AppTemplate, TemplateVar, DeployedApp } from '@/lib/api'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
 import Label from '@/components/ui/Label.vue'
@@ -35,7 +35,7 @@ const customSaving    = ref(false)
 const customForm = ref({
   name: '', icon: '📦', category: '', description: '',
   docUrl: '', postDeploy: '', compose: '',
-  vars: [] as Array<{ name: string; label: string; type: string; default: string; required: boolean; description: string }>,
+  vars: [] as TemplateVar[],
 })
 
 let themeObserver: MutationObserver | null = null

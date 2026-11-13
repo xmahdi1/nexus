@@ -1,11 +1,10 @@
 {
   "compilerOptions": {
-    "composite": true,
-    "skipLibCheck": true,
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "allowSyntheticDefaultImports": true,
-    "strict": true
+    "target": "ES2022", "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext", "moduleResolution": "bundler", "strict": true,
+    "skipLibCheck": true, "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true, "isolatedModules": true, "noEmit": true,
+    "baseUrl": ".", "paths": {"@/*": ["src/*"]}, "types": ["vite/client"]
   },
-  "include": ["vite.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.vue", "src/**/*.d.ts"]
 }

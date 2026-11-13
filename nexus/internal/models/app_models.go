@@ -8,7 +8,7 @@ type DeployedApp struct {
 	TemplateID  string    `                         json:"templateId"`
 	Name        string    `                         json:"name"`
 	ComposePath string    `                         json:"composePath"`
-	VarsJSON    string    `                         json:"varsJson"`
+	VarsJSON    string    `                         json:"-"`
 	Status      string    `gorm:"default:'running'" json:"status"`
 	DeployedAt  time.Time `                         json:"deployedAt"`
 }

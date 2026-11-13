@@ -27,6 +27,9 @@ const STATUS_COLOR: Record<string, string> = {
   ok:      'text-green-600',
   failed:  'text-destructive',
   running: 'text-blue-500',
+  denied: 'text-destructive',
+  cancelled: 'text-yellow-600',
+  interrupted: 'text-destructive',
   pending: 'text-muted-foreground',
 }
 
@@ -183,6 +186,7 @@ async function deleteTask(task: ScheduledTask) {
               </span>
             </div>
             <p class="text-xs font-mono text-muted-foreground mt-0.5 truncate">{{ task.command }}</p>
+            <p class="text-xs text-muted-foreground mt-1">Executes as {{ task.actorId }}</p>
             <div class="flex flex-wrap items-center gap-3 mt-2 text-xs text-muted-foreground">
               <span class="flex items-center gap-1">
                 <CheckCircle2 v-if="task.lastStatus === 'ok'"      class="h-3 w-3 text-green-500" />
@@ -201,7 +205,7 @@ async function deleteTask(task: ScheduledTask) {
           </div>
 
           <div class="flex items-center gap-1 shrink-0">
-            <Button size="icon" variant="ghost" class="h-7 w-7" :disabled="!!running[task.id]" @click="runNow(task)">
+            <Button size="icon" variant="ghost" class="h-7 w-7" :disabled="!!running[task.id] || task.lastStatus === 'running'" @click="runNow(task)">
               <Loader2 v-if="running[task.id]" class="h-3.5 w-3.5 animate-spin" />
               <Play v-else class="h-3.5 w-3.5" />
             </Button>

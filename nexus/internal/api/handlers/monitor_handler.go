@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/xmahdi1/nexus/internal/authorization"
 	"github.com/xmahdi1/nexus/internal/models"
 	"github.com/xmahdi1/nexus/internal/monitor"
 	"gorm.io/gorm"
@@ -23,7 +24,23 @@ func NewMonitorHandler(db *gorm.DB, mon *monitor.Monitor) *MonitorHandler {
 }
 
 func (h *MonitorHandler) Status(w http.ResponseWriter, r *http.Request) {
-	statuses := h.mon.GetStatuses()
+	var ids []string
+	if err := authorization.ScopedServers(r, h.db, "metrics.read").Pluck("servers.id", &ids).Error; err != nil {
+		writeErr(w, "Could not load scoped status.", "internal", 500)
+		return
+	}
+	visible := map[string]bool{}
+	for _, id := range ids {
+		visible[id] = true
+	}
+	statuses := []monitor.ServerStatus{}
+	if h.mon != nil {
+		for _, status := range h.mon.GetStatuses() {
+			if visible[status.ServerID] {
+				statuses = append(statuses, status)
+			}
+		}
+	}
 	if statuses == nil {
 		statuses = []monitor.ServerStatus{}
 	}
@@ -122,7 +139,7 @@ func (h *MonitorHandler) AddMonitored(w http.ResponseWriter, r *http.Request) {
 		ContainerID string `json:"containerId"`
 		Name        string `json:"name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ContainerID == "" {
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || !containerIDRe.MatchString(body.ContainerID) {
 		writeErr(w, "containerId required", "bad_request", http.StatusBadRequest)
 		return
 	}

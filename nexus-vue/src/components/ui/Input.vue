@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { ClassValue } from 'clsx'
 import { cn } from '@/lib/utils'
 
 const props = defineProps<{
@@ -6,8 +7,8 @@ const props = defineProps<{
   type?: string
   placeholder?: string
   required?: boolean
-  class?: string
-  modelValue?: string
+  class?: ClassValue
+  modelValue?: string | number
   readOnly?: boolean
 }>()
 

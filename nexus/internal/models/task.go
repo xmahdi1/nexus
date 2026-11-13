@@ -3,6 +3,10 @@ package models
 import "time"
 
 type ScheduledTask struct {
+	LeaseUntil      *time.Time `json:"-"`
+	ActorID         string     `json:"actorId"`
+	CreatedBy       string     `json:"createdBy"`
+	RunID           string     `json:"-"`
 	ID              string     `gorm:"primaryKey"        json:"id"`
 	ServerID        string     `gorm:"not null;index"    json:"serverId"`
 	Name            string     `json:"name"`

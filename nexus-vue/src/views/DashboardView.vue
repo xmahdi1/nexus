@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import {can} from '@/lib/auth'
 import {ref, computed, onMounted, onUnmounted} from 'vue'
 import {useRouter} from 'vue-router'
 import {toast} from 'vue-sonner'
@@ -274,13 +275,13 @@ onUnmounted(() => {
                     <p class="text-[10px] text-muted-foreground font-mono truncate">{{ c.image }}</p>
                   </div>
                   <div class="flex items-center gap-1 shrink-0 ml-2">
-                    <Button size="icon" variant="ghost" class="h-6 w-6"
+                    <Button v-if="can('docker.manage',server.id)" size="icon" variant="ghost" class="h-6 w-6"
                             :disabled="!!quickActing[`${server.id}:${c.id}`]"
                             @click="quickAction($event, server.id, c.id, 'restart')">
                       <Loader2 v-if="quickActing[`${server.id}:${c.id}`]" class="h-3 w-3 animate-spin"/>
                       <RotateCcw v-else class="h-3 w-3"/>
                     </Button>
-                    <Button size="icon" variant="ghost" class="h-6 w-6 text-yellow-600"
+                    <Button v-if="can('docker.manage',server.id)" size="icon" variant="ghost" class="h-6 w-6 text-yellow-600"
                             :disabled="!!quickActing[`${server.id}:${c.id}`]"
                             @click="quickAction($event, server.id, c.id, 'stop')">
                       <Square class="h-3 w-3"/>

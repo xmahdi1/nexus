@@ -20,6 +20,7 @@ const (
 )
 
 type Alert struct {
+	ServerID   string
 	Type       AlertType
 	ServerName string
 	ServerHost string

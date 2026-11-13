@@ -2,245 +2,237 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
 
-	"github.com/pquerna/otp/totp"
-	"golang.org/x/crypto/bcrypt"
-	"gorm.io/gorm"
-
+	"github.com/go-chi/chi/v5"
+	nexusMW "github.com/xmahdi1/nexus/internal/api/middleware"
 	"github.com/xmahdi1/nexus/internal/auth"
 	"github.com/xmahdi1/nexus/internal/config"
 	"github.com/xmahdi1/nexus/internal/httpx"
 	"github.com/xmahdi1/nexus/internal/models"
+	"gorm.io/gorm"
 )
 
 type AuthHandler struct {
-	cfg *config.Config
-	db  *gorm.DB
+	cfg      *config.Config
+	db       *gorm.DB
+	sessions *auth.Service
 }
 
 func NewAuthHandler(cfg *config.Config, db *gorm.DB) *AuthHandler {
-	db.AutoMigrate(&models.LoginEvent{})
-	return &AuthHandler{cfg: cfg, db: db}
+	return &AuthHandler{cfg: cfg, db: db, sessions: auth.NewService(db, cfg)}
 }
-
+func (h *AuthHandler) fail(w http.ResponseWriter, err error) {
+	status, code, message := 500, "auth_unavailable", "Authentication service unavailable. Try again."
+	if errors.Is(err, auth.ErrCredentials) {
+		status, code, message = 401, "invalid_credentials", "Invalid credentials or expired verification challenge. Restart sign-in if needed."
+	}
+	if errors.Is(err, auth.ErrUnauthorized) {
+		status, code, message = 401, "invalid_session", "Sign in again."
+	}
+	if errors.Is(err, auth.ErrStepUp) {
+		status, code, message = 403, "step_up_required", err.Error()
+	}
+	if errors.Is(err, auth.ErrConfigWrite) || errors.Is(err, auth.ErrMFAEnabled) {
+		status, code, message = 409, "configuration_conflict", err.Error()
+	}
+	writeErr(w, message, code, status)
+}
+func (h *AuthHandler) setCookie(w http.ResponseWriter, r *http.Request, token string) {
+	maxAge := int(h.sessions.AbsoluteTTL.Seconds())
+	expiry := time.Now().Add(h.sessions.AbsoluteTTL)
+	if token == "" {
+		maxAge = -1
+		expiry = time.Unix(0, 0)
+	}
+	http.SetCookie(w, &http.Cookie{Name: auth.CookieName(), Value: token, HttpOnly: true, Secure: nexusMW.SecureRequest(r, h.cfg.TrustProxy), SameSite: http.SameSiteStrictMode, Path: "/", Expires: expiry, MaxAge: maxAge})
+	// Expire the obsolete JWT cookie. It is never accepted by the new middleware.
+	http.SetCookie(w, &http.Cookie{Name: "nexus_token", Value: "", HttpOnly: true, Secure: nexusMW.SecureRequest(r, h.cfg.TrustProxy), SameSite: http.SameSiteStrictMode, Path: "/", Expires: time.Unix(0, 0), MaxAge: -1})
+}
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, "invalid request body", "bad_request", http.StatusBadRequest)
+	var body struct{ Username, Password, DeviceLabel string }
+	if json.NewDecoder(r.Body).Decode(&body) != nil {
+		writeErr(w, "Invalid request body.", "bad_request", 400)
 		return
 	}
-	ip := httpx.ClientIP(r, h.cfg.TrustProxy)
-
-	if !auth.CheckPassword(h.cfg.PasswordHash, body.Password) {
-		h.logEvent(ip, false, "bad_password")
-		writeErr(w, "invalid credentials", "unauthorized", http.StatusUnauthorized)
+	result, err := h.sessions.Login(body.Username, body.Password, body.DeviceLabel, httpx.ClientIP(r, h.cfg.TrustProxy))
+	if err != nil {
+		h.logEvent(r, false, "bad_password")
+		h.fail(w, err)
 		return
 	}
-
-	if h.cfg.TOTPEnabled && h.cfg.TOTPSecret != "" {
-		pending := auth.NewPendingToken()
-		if pending == "" {
-			writeErr(w, "could not start MFA challenge", "internal", http.StatusInternalServerError)
-			return
-		}
-		h.logEvent(ip, false, "mfa_required")
-		writeJSON(w, map[string]any{
-			"ok":           false,
-			"mfaRequired":  true,
-			"pendingToken": pending,
-		}, http.StatusOK)
+	if result.MFARequired {
+		h.logEvent(r, false, "mfa_required")
+		writeJSON(w, map[string]any{"ok": false, "mfaRequired": true, "pendingToken": result.PendingToken}, 200)
 		return
 	}
-
-	h.logEvent(ip, true, "ok")
-	h.issueSession(w)
+	h.logEvent(r, true, "ok")
+	h.setCookie(w, r, result.Token)
+	writeJSON(w, map[string]any{"ok": true, "mfaRequired": false}, 200)
 }
-
 func (h *AuthHandler) MFAVerify(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		PendingToken string `json:"pendingToken"`
-		Code         string `json:"code"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, "invalid request body", "bad_request", http.StatusBadRequest)
+	var body struct{ PendingToken, Code, DeviceLabel string }
+	if json.NewDecoder(r.Body).Decode(&body) != nil {
+		writeErr(w, "Invalid request body.", "bad_request", 400)
 		return
 	}
-	ip := httpx.ClientIP(r, h.cfg.TrustProxy)
-
-	if !auth.ConsumePendingToken(body.PendingToken) {
-		h.logEvent(ip, false, "session_expired")
-		writeErr(w, "session expired — please log in again", "session_expired", http.StatusUnauthorized)
-		return
-	}
-	if !totp.Validate(body.Code, h.cfg.TOTPSecret) {
-		h.logEvent(ip, false, "bad_mfa")
-		writeErr(w, "invalid code", "invalid_code", http.StatusUnauthorized)
-		return
-	}
-
-	h.logEvent(ip, true, "ok")
-	h.issueSession(w)
-}
-
-func (h *AuthHandler) MFASetup(w http.ResponseWriter, r *http.Request) {
-	key, err := totp.Generate(totp.GenerateOpts{Issuer: "Nexus", AccountName: "admin"})
+	result, err := h.sessions.VerifyMFA(body.PendingToken, body.Code, body.DeviceLabel, httpx.ClientIP(r, h.cfg.TrustProxy))
 	if err != nil {
-		writeErr(w, "failed to generate secret", "internal", http.StatusInternalServerError)
+		h.logEvent(r, false, "bad_mfa")
+		h.fail(w, err)
 		return
 	}
-	writeJSON(w, map[string]string{"secret": key.Secret(), "uri": key.URL()}, http.StatusOK)
+	h.logEvent(r, true, "ok")
+	h.setCookie(w, r, result.Token)
+	writeJSON(w, map[string]bool{"ok": true}, 200)
 }
-
-func (h *AuthHandler) MFAEnable(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Secret string `json:"secret"`
-		Code   string `json:"code"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, "invalid request body", "bad_request", http.StatusBadRequest)
-		return
-	}
-	if body.Secret == "" || body.Code == "" {
-		writeErr(w, "secret and code are required", "bad_request", http.StatusBadRequest)
-		return
-	}
-	if !totp.Validate(body.Code, body.Secret) {
-		writeErr(w, "invalid code", "invalid_code", http.StatusUnauthorized)
-		return
-	}
-	if err := h.cfg.UpdateTOTP(body.Secret, true); err != nil {
-		writeErr(w, "failed to save MFA config: "+err.Error(), "internal", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]bool{"ok": true}, http.StatusOK)
+func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
+	a, _ := auth.FromContext(r.Context())
+	writeJSON(w, map[string]any{"ok": true, "mode": a.Mode, "user": a.User, "session": a.Session}, 200)
 }
-
-func (h *AuthHandler) MFADisable(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Code string `json:"code"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, "invalid request body", "bad_request", http.StatusBadRequest)
+func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	a, _ := auth.FromContext(r.Context())
+	if err := h.sessions.Revoke(a, a.Session.ID, false); err != nil {
+		h.fail(w, err)
 		return
 	}
-	if !h.cfg.TOTPEnabled || h.cfg.TOTPSecret == "" {
-		writeErr(w, "MFA is not enabled", "not_enabled", http.StatusBadRequest)
-		return
-	}
-	if !totp.Validate(body.Code, h.cfg.TOTPSecret) {
-		writeErr(w, "invalid code", "invalid_code", http.StatusUnauthorized)
-		return
-	}
-	if err := h.cfg.UpdateTOTP("", false); err != nil {
-		writeErr(w, "failed to disable MFA: "+err.Error(), "internal", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]bool{"ok": true}, http.StatusOK)
+	h.logEvent(r, true, "logout")
+	h.setCookie(w, r, "")
+	writeJSON(w, map[string]bool{"ok": true}, 200)
 }
-
-func (h *AuthHandler) MFAStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]bool{"enabled": h.cfg.TOTPEnabled}, http.StatusOK)
+func (h *AuthHandler) LogoutAll(w http.ResponseWriter, r *http.Request) {
+	a, _ := auth.FromContext(r.Context())
+	if err := h.sessions.Revoke(a, "", true); err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.logEvent(r, true, "logout_all")
+	h.setCookie(w, r, "")
+	writeJSON(w, map[string]bool{"ok": true}, 200)
 }
-
+func (h *AuthHandler) Sessions(w http.ResponseWriter, r *http.Request) {
+	a, _ := auth.FromContext(r.Context())
+	sessions, err := h.sessions.Sessions(a)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, sessions, 200)
+}
+func (h *AuthHandler) RevokeSession(w http.ResponseWriter, r *http.Request) {
+	a, _ := auth.FromContext(r.Context())
+	id := chi.URLParam(r, "sid")
+	if err := h.sessions.Revoke(a, id, false); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			writeErr(w, "Session not found.", "not_found", 404)
+		} else {
+			h.fail(w, err)
+		}
+		return
+	}
+	if id == a.Session.ID {
+		h.setCookie(w, r, "")
+	}
+	h.logEvent(r, true, "session_revoked")
+	w.WriteHeader(204)
+}
 func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		CurrentPassword string `json:"currentPassword"`
-		NewPassword     string `json:"newPassword"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, "invalid request body", "bad_request", http.StatusBadRequest)
+	var body struct{ CurrentPassword, NewPassword string }
+	if json.NewDecoder(r.Body).Decode(&body) != nil || len(body.NewPassword) < 12 || len(body.NewPassword) > 1024 {
+		writeErr(w, "New password must contain 12 to 1024 bytes.", "bad_request", 400)
 		return
 	}
-	if body.CurrentPassword == "" || body.NewPassword == "" {
-		writeErr(w, "currentPassword and newPassword are required", "bad_request", http.StatusBadRequest)
+	a, _ := auth.FromContext(r.Context())
+	if err := h.sessions.ChangePassword(a, body.CurrentPassword, body.NewPassword); err != nil {
+		h.fail(w, err)
 		return
 	}
-	if len(body.NewPassword) < 8 {
-		writeErr(w, "password must be at least 8 characters", "bad_request", http.StatusBadRequest)
-		return
-	}
-	if !auth.CheckPassword(h.cfg.PasswordHash, body.CurrentPassword) {
-		writeErr(w, "current password is incorrect", "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(body.NewPassword), 12)
-	if err != nil {
-		writeErr(w, "failed to hash password", "internal", http.StatusInternalServerError)
-		return
-	}
-	if err := h.cfg.UpdatePasswordHash(string(hash)); err != nil {
-		writeErr(w, "failed to update config: "+err.Error(), "internal", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]bool{"ok": true}, http.StatusOK)
+	h.logEvent(r, true, "password_changed")
+	h.setCookie(w, r, "")
+	writeJSON(w, map[string]bool{"ok": true, "reauthenticate": true}, 200)
 }
-
+func (h *AuthHandler) MFAStatus(w http.ResponseWriter, r *http.Request) {
+	a, _ := auth.FromContext(r.Context())
+	enabled, err := h.sessions.MFAEnabled(a)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	remaining, err := h.sessions.RecoveryRemaining(a.User.ID)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"enabled": enabled, "recoveryCodesRemaining": remaining}, 200)
+}
+func (h *AuthHandler) MFASetup(w http.ResponseWriter, r *http.Request) {
+	var body struct{ CurrentPassword string }
+	if json.NewDecoder(r.Body).Decode(&body) != nil {
+		writeErr(w, "Current password is required.", "bad_request", 400)
+		return
+	}
+	a, _ := auth.FromContext(r.Context())
+	result, err := h.sessions.SetupMFA(a, body.CurrentPassword)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, result, 200)
+}
+func (h *AuthHandler) MFAEnable(w http.ResponseWriter, r *http.Request) {
+	var body struct{ SetupToken, Code string }
+	if json.NewDecoder(r.Body).Decode(&body) != nil {
+		writeErr(w, "Invalid request body.", "bad_request", 400)
+		return
+	}
+	a, _ := auth.FromContext(r.Context())
+	codes, err := h.sessions.EnableMFA(a, body.SetupToken, body.Code)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.logEvent(r, true, "mfa_enabled")
+	h.setCookie(w, r, "")
+	writeJSON(w, map[string]any{"ok": true, "reauthenticate": true, "recoveryCodes": codes}, 200)
+}
+func (h *AuthHandler) MFADisable(w http.ResponseWriter, r *http.Request) {
+	var body struct{ Code string }
+	if json.NewDecoder(r.Body).Decode(&body) != nil {
+		writeErr(w, "Invalid request body.", "bad_request", 400)
+		return
+	}
+	a, _ := auth.FromContext(r.Context())
+	if err := h.sessions.DisableMFA(a, body.Code); err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.logEvent(r, true, "mfa_disabled")
+	h.setCookie(w, r, "")
+	writeJSON(w, map[string]bool{"ok": true, "reauthenticate": true}, 200)
+}
 func (h *AuthHandler) AuditLog(w http.ResponseWriter, r *http.Request) {
 	limit := 10
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
-			limit = n
-		}
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 100 {
+		limit = n
 	}
-	var events []models.LoginEvent
-	h.db.Order("created_at desc").Limit(limit).Find(&events)
-	if events == nil {
-		events = []models.LoginEvent{}
-	}
-	writeJSON(w, events, http.StatusOK)
-}
-
-func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     auth.CookieName(),
-		Value:    "",
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
-		Path:     "/",
-		Expires:  time.Unix(0, 0),
-		MaxAge:   -1,
-	})
-	writeJSON(w, map[string]bool{"ok": true}, http.StatusOK)
-}
-
-func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]bool{"ok": true}, http.StatusOK)
-}
-
-func (h *AuthHandler) issueSession(w http.ResponseWriter) {
-	token, err := auth.GenerateToken(h.cfg.EncryptionKey)
-	if err != nil {
-		writeErr(w, "could not issue token", "internal", http.StatusInternalServerError)
+	events := []models.LoginEvent{}
+	if err := h.db.Order("created_at desc").Limit(limit).Find(&events).Error; err != nil {
+		writeErr(w, "Could not load login events.", "internal", 500)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     auth.CookieName(),
-		Value:    token,
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
-		Path:     "/",
-		Expires:  time.Now().Add(auth.TokenTTL()),
-	})
-	writeJSON(w, map[string]any{"ok": true, "mfaRequired": false}, http.StatusOK)
+	writeJSON(w, events, 200)
 }
-
-func (h *AuthHandler) logEvent(ip string, success bool, reason string) {
-	h.db.Create(&models.LoginEvent{IP: ip, Success: success, Reason: reason})
+func (h *AuthHandler) logEvent(r *http.Request, success bool, reason string) {
+	h.db.Create(&models.LoginEvent{IP: httpx.ClientIP(r, h.cfg.TrustProxy), Success: success, Reason: reason})
 }
-
 func writeJSON(w http.ResponseWriter, v any, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
 }
-
 func writeErr(w http.ResponseWriter, msg, code string, status int) {
-	writeJSON(w, map[string]string{"error": msg, "code": code}, status)
+	writeJSON(w, map[string]string{"error": msg, "message": msg, "code": code, "request_id": w.Header().Get("X-Request-ID")}, status)
 }

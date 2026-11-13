@@ -1,12 +1,8 @@
 <script setup lang="ts">
 import {ref, provide} from 'vue'
-import {useRouter} from 'vue-router'
 import {Menu} from '@lucide/vue'
-import {isAuthed} from '@/lib/auth'
 import AppSidebar from './AppSidebar.vue'
 
-const router = useRouter()
-if (!isAuthed()) router.push('/login')
 
 const collapsed = ref(false)
 const mobileOpen = ref(false)

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import {can} from '@/lib/auth'
 import {ref, onMounted} from 'vue'
 import {useI18n} from 'vue-i18n'
 import {toast} from 'vue-sonner'
@@ -76,7 +77,7 @@ onMounted(() => store.fetchAll())
           <h1 class="text-xl sm:text-2xl font-semibold tracking-tight">{{ t('servers.title') }}</h1>
           <p class="text-sm text-muted-foreground mt-1">{{ t('servers.subtitle') }}</p>
         </div>
-        <Button class="gap-2" @click="modalOpen = true">
+        <Button v-if="can('servers.create')" class="gap-2" @click="modalOpen = true">
           <Plus class="h-4 w-4"/>
           <span class="hidden sm:inline">{{ t('servers.add') }}</span>
         </Button>
@@ -129,10 +130,10 @@ onMounted(() => store.fetchAll())
               </TableCell>
               <TableCell>
                 <div class="flex items-center justify-end gap-1">
-                  <Button size="icon" variant="ghost" class="h-7 w-7" @click="handleTest(s.id)">
+                  <Button v-if="can('servers.connect',s.id)" size="icon" variant="ghost" class="h-7 w-7" @click="handleTest(s.id)">
                     <RefreshCw class="h-3.5 w-3.5"/>
                   </Button>
-                  <Button size="icon" variant="ghost" class="h-7 w-7 text-destructive hover:text-destructive"
+                  <Button v-if="can('servers.delete',s.id)" size="icon" variant="ghost" class="h-7 w-7 text-destructive hover:text-destructive"
                           @click="handleDelete(s.id, s.name)">
                     <Trash2 class="h-3.5 w-3.5"/>
                   </Button>

@@ -10,18 +10,22 @@ import QRCode from 'qrcode'
 import {api} from '@/lib/api'
 import {applyTheme, getTheme, type Theme} from '@/lib/theme'
 import AppLayout from '@/components/AppLayout.vue'
+import AccessSettings from '@/components/AccessSettings.vue'
+import UserSettings from '@/components/UserSettings.vue'
+import RecoveryCodes from '@/components/RecoveryCodes.vue'
+import {can} from '@/lib/auth'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
 import Label from '@/components/ui/Label.vue'
-import type {AlertConfig, LoginEvent} from '@/lib/api'
+import type {AlertConfig, LoginEvent, DeviceSession} from '@/lib/api'
 
 const {t, locale, availableLocales} = useI18n()
 
 const sections = [
   {id: 'appearance', label: 'Appearance', icon: Palette},
   {id: 'security', label: 'Security', icon: Shield},
-  {id: 'notifications', label: 'Notifications', icon: Bell},
-  {id: 'login-history', label: 'Login History', icon: History},
+  ...(can('settings.manage') ? [{id: 'notifications', label: 'Notifications', icon: Bell}] : []),
+  ...(can('audit.read') ? [{id: 'login-history', label: 'Login History', icon: History}] : []),
 ]
 
 const activeSection = ref('appearance')
@@ -32,8 +36,37 @@ const currentPw = ref('');
 const newPw = ref('');
 const confirmPw = ref('')
 const pwLoading = ref(false)
+const sessions = ref<DeviceSession[]>([])
+const currentSession = ref('')
+const sessionsLoading = ref(false)
+const sessionError = ref('')
+async function loadSessions() {
+  sessionsLoading.value = true; sessionError.value = ''
+  try { const [devices, me] = await Promise.all([api.auth.sessions(), api.auth.me()]); sessions.value = devices; currentSession.value = me.session.id }
+  catch (e) { sessionError.value = e instanceof Error ? e.message : 'Could not load sessions' }
+  finally { sessionsLoading.value = false }
+}
+async function revokeDevice(id: string) {
+  try { await api.auth.revokeSession(id); if (id === currentSession.value) window.location.href = '/login'; else await loadSessions() }
+  catch (e) { sessionError.value = e instanceof Error ? e.message : 'Could not revoke session' }
+}
+async function logoutAll() {
+  try { await api.auth.logoutAll(); window.location.href = '/login' }
+  catch (e) { sessionError.value = e instanceof Error ? e.message : 'Could not revoke sessions' }
+}
+onMounted(loadSessions)
+
 
 const mfaEnabled = ref(false)
+const recoveryCodes = ref<string[]>([])
+const recoveryRemaining = ref(0)
+const recoveryPassword = ref('')
+async function regenerateCodes() {
+  try { const result = await api.auth.regenerateRecovery(recoveryPassword.value); recoveryPassword.value = ''; recoveryCodes.value = result.recoveryCodes }
+  catch(e) { toast.error(e instanceof Error ? e.message : 'Could not regenerate codes') }
+}
+const mfaPassword = ref('')
+const setupToken = ref('')
 const setupStep = ref<'idle' | 'scan' | 'verify'>('idle')
 const setupSecret = ref('')
 const setupQR = ref('')
@@ -89,14 +122,15 @@ async function changePassword() {
     toast.error('New passwords do not match');
     return
   }
-  if (newPw.value.length < 8) {
-    toast.error('New password must be at least 8 characters');
+  if (new TextEncoder().encode(newPw.value).length < 12) {
+    toast.error('New password must be at least 12 bytes');
     return
   }
   pwLoading.value = true
   try {
     await api.auth.changePassword(currentPw.value, newPw.value)
-    toast.success('Password updated')
+    toast.success('Password updated. Sign in again.')
+    window.location.href = '/login'
     currentPw.value = '';
     newPw.value = '';
     confirmPw.value = ''
@@ -110,7 +144,9 @@ async function changePassword() {
 async function startSetup() {
   setupLoading.value = true
   try {
-    const res = await api.auth.mfaSetup()
+    const res = await api.auth.mfaSetup(mfaPassword.value)
+    mfaPassword.value = ''
+    setupToken.value = res.setupToken
     setupSecret.value = res.secret
     setupQR.value = await QRCode.toDataURL(res.uri, {width: 200, margin: 1})
     setupStep.value = 'scan'
@@ -128,13 +164,16 @@ async function enableMFA() {
   }
   setupLoading.value = true
   try {
-    await api.auth.mfaEnable(setupSecret.value, setupCode.value)
+    const result = await api.auth.mfaEnable(setupToken.value, setupCode.value)
+    recoveryCodes.value = result.recoveryCodes
     mfaEnabled.value = true;
     setupStep.value = 'idle';
     setupCode.value = ''
-    toast.success('Two-factor authentication enabled')
+    cancelSetup()
+    toast.success('Save your recovery codes, then sign in again.')
   } catch (e) {
-    toast.error(e instanceof Error ? e.message : 'Invalid code — try again')
+    cancelSetup()
+    toast.error(e instanceof Error ? e.message : 'Code invalid or expired. Start setup again.')
   } finally {
     setupLoading.value = false
   }
@@ -144,6 +183,9 @@ function cancelSetup() {
   setupStep.value = 'idle';
   setupCode.value = '';
   setupQR.value = ''
+  setupSecret.value = ''
+  setupToken.value = ''
+  mfaPassword.value = ''
 }
 
 async function disableMFA() {
@@ -157,7 +199,8 @@ async function disableMFA() {
     mfaEnabled.value = false;
     disableOpen.value = false;
     disableCode.value = ''
-    toast.success('Two-factor authentication disabled')
+    toast.success('Two-factor authentication disabled. Sign in again.')
+    window.location.href = '/login'
   } catch (e) {
     toast.error(e instanceof Error ? e.message : 'Invalid code')
   } finally {
@@ -195,8 +238,9 @@ async function testTelegram() {
 
 async function refreshAudit() {
   auditLoading.value = true
+  if (can('settings.manage')) { try { alertCfg.value = await api.monitor.getConfig() } catch {} }
   try {
-    auditLog.value = await api.auth.auditLog(auditLimit.value)
+    if (can('audit.read')) auditLog.value = await api.auth.auditLog(auditLimit.value)
   } catch {
   } finally {
     auditLoading.value = false
@@ -207,13 +251,14 @@ let observer: IntersectionObserver | null = null
 
 onMounted(async () => {
   try {
-    const [mfaRes, cfg] = await Promise.all([api.auth.mfaStatus(), api.monitor.getConfig()])
+    const mfaRes = await api.auth.mfaStatus()
     mfaEnabled.value = mfaRes.enabled
-    alertCfg.value = cfg
+    recoveryRemaining.value = mfaRes.recoveryCodesRemaining
   } catch {
   }
+  if (can('settings.manage')) { try { alertCfg.value = await api.monitor.getConfig() } catch {} }
   try {
-    auditLog.value = await api.auth.auditLog(auditLimit.value)
+    if (can('audit.read')) auditLog.value = await api.auth.auditLog(auditLimit.value)
   } catch {
   }
 
@@ -286,6 +331,24 @@ onUnmounted(() => observer?.disconnect())
 
           <section id="security" class="bg-card border rounded-xl p-5 sm:p-6 space-y-4 scroll-mt-4">
             <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Security</h2>
+            <UserSettings/>
+            <AccessSettings/>
+            <div v-if="recoveryCodes.length" class="space-y-3"><RecoveryCodes :codes="recoveryCodes"/><a href="/login" class="underline">I saved my codes — sign in again</a></div>
+            <div class="border rounded-lg p-4 space-y-3">
+              <div class="flex items-center justify-between gap-2">
+                <h3 class="font-medium">Signed-in devices</h3>
+                <Button variant="outline" size="sm" :disabled="sessionsLoading" @click="loadSessions">Refresh</Button>
+              </div>
+              <p v-if="sessionsLoading" class="text-sm">Loading sessions…</p>
+              <p v-if="sessionError" class="text-sm text-destructive">{{ sessionError }}</p>
+              <p v-if="!sessionsLoading && !sessions.length && !sessionError" class="text-sm">No active sessions.</p>
+              <div v-for="device in sessions" :key="device.id" class="flex items-center justify-between gap-3 border-t pt-2">
+                <div class="text-sm"><p>{{ device.deviceLabel }} <span v-if="device.id === currentSession">(this device)</span></p>
+                  <p class="text-xs text-muted-foreground">{{ device.clientIP }} · Last used {{ fmtDate(device.lastUsedAt) }}</p></div>
+                <Button variant="outline" size="sm" @click="revokeDevice(device.id)">Sign out</Button>
+              </div>
+              <Button variant="outline" size="sm" @click="logoutAll">Sign out all devices</Button>
+            </div>
             <div class="grid gap-3">
               <div class="grid gap-1.5">
                 <Label for="cur">Current password</Label>
@@ -325,6 +388,7 @@ onUnmounted(() => observer?.disconnect())
                     }}
                   </p>
                 </div>
+                <Input v-if="!mfaEnabled && setupStep === 'idle'" v-model="mfaPassword" type="password" autocomplete="current-password" aria-label="Current password for MFA enrollment" placeholder="Current password to enroll MFA"/>
                 <Button v-if="!mfaEnabled && setupStep === 'idle'" variant="outline" size="sm"
                         class="gap-2 shrink-0" :disabled="setupLoading" @click="startSetup">
                   <Loader2 v-if="setupLoading" class="h-3.5 w-3.5 animate-spin"/>
@@ -365,9 +429,10 @@ onUnmounted(() => observer?.disconnect())
                 </div>
               </div>
 
+              <div v-if="mfaEnabled && !recoveryCodes.length" class="space-y-2"><p class="text-sm">{{ recoveryRemaining }} recovery codes remaining. Regenerating signs out all devices.</p><Input v-model="recoveryPassword" type="password" autocomplete="current-password" placeholder="Current password"/><Button variant="outline" @click="regenerateCodes">Regenerate recovery codes</Button></div>
               <div v-if="disableOpen" class="border rounded-xl p-5 space-y-3 bg-muted/20">
-                <p class="text-sm font-medium">Confirm with your authenticator app</p>
-                <Input v-model="disableCode" type="text" inputmode="numeric" maxlength="6"
+                <p class="text-sm font-medium">Confirm with your authenticator app or a recovery code</p>
+                <Input v-model="disableCode" type="text" maxlength="40"
                        placeholder="000000" class="text-center tracking-[0.5em] font-mono text-lg"
                        @keydown.enter="disableMFA"/>
                 <div class="flex gap-2">
@@ -445,7 +510,7 @@ onUnmounted(() => observer?.disconnect())
             </Button>
           </section>
 
-          <section id="login-history" class="bg-card border rounded-xl p-5 sm:p-6 space-y-4 scroll-mt-4">
+          <section v-if="can('audit.read')" id="login-history" class="bg-card border rounded-xl p-5 sm:p-6 space-y-4 scroll-mt-4">
             <div class="flex flex-wrap items-center justify-between gap-3">
               <div class="flex items-center gap-2">
                 <History class="h-5 w-5 text-muted-foreground"/>

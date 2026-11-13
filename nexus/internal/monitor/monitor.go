@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xmahdi1/nexus/internal/authorization"
 	nexuscrypto "github.com/xmahdi1/nexus/internal/crypto"
 	"github.com/xmahdi1/nexus/internal/models"
 	nexusssh "github.com/xmahdi1/nexus/internal/ssh"
@@ -40,13 +41,6 @@ type Monitor struct {
 }
 
 func New(db *gorm.DB, encKey []byte, pool *nexusssh.Pool) *Monitor {
-	db.AutoMigrate(&models.AlertConfig{}, &models.MonitoredContainer{}, &models.ServerAlertConfig{})
-	var cfg models.AlertConfig
-	if db.First(&cfg, "id = ?", "default").Error != nil {
-		db.Create(&models.AlertConfig{
-			ID: "default", NotifyServerDown: true, NotifyServerUp: true, NotifyContainer: true,
-		})
-	}
 	m := &Monitor{db: db, encKey: encKey, pool: pool}
 	m.reloadBot()
 	return m
@@ -118,6 +112,16 @@ func (m *Monitor) shouldNotify(t AlertType) bool {
 }
 
 func (m *Monitor) notify(a Alert) {
+	permission := "metrics.read"
+	switch a.Type {
+	case AlertServerDown, AlertServerUp:
+		permission = "servers.connect"
+	case AlertContainerDown, AlertContainerUp:
+		permission = "docker.read"
+	}
+	if !authorization.New(m.db).All(authorization.MonitorPrincipal, a.ServerID, permission, "notifications.send") {
+		return
+	}
 	if !m.shouldNotify(a.Type) {
 		return
 	}
@@ -142,6 +146,9 @@ func (m *Monitor) checkAllServers() {
 }
 
 func (m *Monitor) checkServer(server models.Server) {
+	if !authorization.New(m.db).All(authorization.MonitorPrincipal, server.ID, "servers.connect") {
+		return
+	}
 	latency, online := tcpPing(server.Host, server.Port, 5*time.Second)
 	now := time.Now()
 	status := &ServerStatus{
@@ -161,7 +168,7 @@ func (m *Monitor) checkServer(server models.Server) {
 	if prev, hadPrev := m.prevOnline.Load(server.ID); hadPrev {
 		wasOnline := prev.(bool)
 		if wasOnline && !online {
-			m.notify(Alert{Type: AlertServerDown, ServerName: server.Name, ServerHost: server.Host, OccurredAt: now})
+			m.notify(Alert{ServerID: server.ID, Type: AlertServerDown, ServerName: server.Name, ServerHost: server.Host, OccurredAt: now})
 		} else if !wasOnline && online {
 			downtime := ""
 			if !prevLastOnline.IsZero() {
@@ -169,7 +176,7 @@ func (m *Monitor) checkServer(server models.Server) {
 					downtime = fmtDuration(d)
 				}
 			}
-			m.notify(Alert{Type: AlertServerUp, ServerName: server.Name, ServerHost: server.Host, Detail: downtime, OccurredAt: now})
+			m.notify(Alert{ServerID: server.ID, Type: AlertServerUp, ServerName: server.Name, ServerHost: server.Host, Detail: downtime, OccurredAt: now})
 		}
 	}
 	m.prevOnline.Store(server.ID, online)
@@ -204,6 +211,9 @@ func (m *Monitor) checkAllResources() {
 }
 
 func (m *Monitor) checkResources(server models.Server) {
+	if !authorization.New(m.db).All(authorization.MonitorPrincipal, server.ID, "metrics.read", "secrets.use") {
+		return
+	}
 	var cfg models.ServerAlertConfig
 	if err := m.db.First(&cfg, "id = ?", server.ID).Error; err != nil {
 		return
@@ -229,6 +239,10 @@ func (m *Monitor) checkResources(server models.Server) {
 		return
 	}
 	defer sess.Close()
+	defer authorization.New(m.db).Watch(authorization.MonitorPrincipal, server.ID, func() { sess.Close() }, "metrics.read", "secrets.use")()
+	if !authorization.New(m.db).All(authorization.MonitorPrincipal, server.ID, "metrics.read", "secrets.use") {
+		return
+	}
 
 	out, err := sess.Output(`
 read -r _ u1 n1 s1 i1 io1 irq1 sirq1 _ < /proc/stat
@@ -265,7 +279,7 @@ printf "%s %s %s\n" "${CPU:-0}" "${RAM:-0}" "${DISK:-0}"
 	if cfg.CPUEnabled && cpu >= cfg.CPUThreshold {
 		key := server.ID + ":cpu"
 		if last, ok := m.lastAlerted.Load(key); !ok || now.Sub(last.(time.Time)) > cooldown {
-			m.notify(Alert{Type: AlertHighResource, ServerName: server.Name, ServerHost: server.Host,
+			m.notify(Alert{ServerID: server.ID, Type: AlertHighResource, ServerName: server.Name, ServerHost: server.Host,
 				Detail: fmt.Sprintf("CPU %.1f%% (threshold %.0f%%)", cpu, cfg.CPUThreshold), OccurredAt: now})
 			m.lastAlerted.Store(key, now)
 		}
@@ -273,7 +287,7 @@ printf "%s %s %s\n" "${CPU:-0}" "${RAM:-0}" "${DISK:-0}"
 	if cfg.RAMEnabled && ram >= cfg.RAMThreshold {
 		key := server.ID + ":ram"
 		if last, ok := m.lastAlerted.Load(key); !ok || now.Sub(last.(time.Time)) > cooldown {
-			m.notify(Alert{Type: AlertHighResource, ServerName: server.Name, ServerHost: server.Host,
+			m.notify(Alert{ServerID: server.ID, Type: AlertHighResource, ServerName: server.Name, ServerHost: server.Host,
 				Detail: fmt.Sprintf("RAM %.0f%% (threshold %.0f%%)", ram, cfg.RAMThreshold), OccurredAt: now})
 			m.lastAlerted.Store(key, now)
 		}
@@ -281,7 +295,7 @@ printf "%s %s %s\n" "${CPU:-0}" "${RAM:-0}" "${DISK:-0}"
 	if cfg.DiskEnabled && disk >= cfg.DiskThreshold {
 		key := server.ID + ":disk"
 		if last, ok := m.lastAlerted.Load(key); !ok || now.Sub(last.(time.Time)) > cooldown {
-			m.notify(Alert{Type: AlertHighResource, ServerName: server.Name, ServerHost: server.Host,
+			m.notify(Alert{ServerID: server.ID, Type: AlertHighResource, ServerName: server.Name, ServerHost: server.Host,
 				Detail: fmt.Sprintf("Disk %.0f%% (threshold %.0f%%)", disk, cfg.DiskThreshold), OccurredAt: now})
 			m.lastAlerted.Store(key, now)
 		}
@@ -307,6 +321,9 @@ func (m *Monitor) checkAllContainers() {
 }
 
 func (m *Monitor) SeedContainer(serverID, containerID, name string) {
+	if !authorization.New(m.db).All(authorization.MonitorPrincipal, serverID, "docker.read", "secrets.use") {
+		return
+	}
 	var server models.Server
 	if err := m.db.First(&server, "id = ?", serverID).Error; err != nil {
 		return
@@ -328,9 +345,13 @@ func (m *Monitor) SeedContainer(serverID, containerID, name string) {
 		return
 	}
 	defer sess.Close()
+	defer authorization.New(m.db).Watch(authorization.MonitorPrincipal, server.ID, func() { sess.Close() }, "docker.read", "secrets.use")()
+	if !authorization.New(m.db).All(authorization.MonitorPrincipal, server.ID, "docker.read", "secrets.use") {
+		return
+	}
 
 	out, _ := sess.Output(fmt.Sprintf(
-		"docker inspect --format='{{.State.Status}}' %s 2>/dev/null", containerID,
+		"docker inspect --format='{{.State.Status}}' -- %s 2>/dev/null", "'"+strings.ReplaceAll(containerID, "'", "'\"'\"'")+"'",
 	))
 	state := strings.TrimSpace(string(out))
 	if state == "" || name == "" {
@@ -348,6 +369,9 @@ func (m *Monitor) SeedContainer(serverID, containerID, name string) {
 }
 
 func (m *Monitor) checkContainers(serverID string, monitored []models.MonitoredContainer) {
+	if !authorization.New(m.db).All(authorization.MonitorPrincipal, serverID, "docker.read", "secrets.use") {
+		return
+	}
 	var server models.Server
 	if err := m.db.First(&server, "id = ?", serverID).Error; err != nil {
 		return
@@ -369,6 +393,10 @@ func (m *Monitor) checkContainers(serverID string, monitored []models.MonitoredC
 		return
 	}
 	defer sess.Close()
+	defer authorization.New(m.db).Watch(authorization.MonitorPrincipal, server.ID, func() { sess.Close() }, "docker.read", "secrets.use")()
+	if !authorization.New(m.db).All(authorization.MonitorPrincipal, server.ID, "docker.read", "secrets.use") {
+		return
+	}
 
 	out, _ := sess.Output(`docker ps -a --format '{{.Names}}|{{.State}}' 2>/dev/null`)
 
@@ -396,9 +424,9 @@ func (m *Monitor) checkContainers(serverID string, monitored []models.MonitoredC
 		}
 		if prev != "" {
 			if prev == "running" && cur != "running" && cur != "" {
-				m.notify(Alert{Type: AlertContainerDown, ServerName: server.Name, ServerHost: server.Host, Detail: mc.Name, OccurredAt: now})
+				m.notify(Alert{ServerID: server.ID, Type: AlertContainerDown, ServerName: server.Name, ServerHost: server.Host, Detail: mc.Name, OccurredAt: now})
 			} else if prev != "running" && cur == "running" {
-				m.notify(Alert{Type: AlertContainerUp, ServerName: server.Name, ServerHost: server.Host, Detail: mc.Name, OccurredAt: now})
+				m.notify(Alert{ServerID: server.ID, Type: AlertContainerUp, ServerName: server.Name, ServerHost: server.Host, Detail: mc.Name, OccurredAt: now})
 			}
 		}
 	}

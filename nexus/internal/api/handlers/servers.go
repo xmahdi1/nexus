@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/xmahdi1/nexus/internal/authorization"
 	nexuscrypto "github.com/xmahdi1/nexus/internal/crypto"
 	"github.com/xmahdi1/nexus/internal/models"
 	"github.com/xmahdi1/nexus/internal/monitor"
@@ -39,7 +40,7 @@ func (h *ServersHandler) GenerateKey(w http.ResponseWriter, r *http.Request) {
 
 func (h *ServersHandler) List(w http.ResponseWriter, r *http.Request) {
 	var servers []models.Server
-	if err := h.db.Order("created_at desc").Find(&servers).Error; err != nil {
+	if err := authorization.ScopedServers(r, h.db, "servers.read").Order("created_at desc").Find(&servers).Error; err != nil {
 		writeErr(w, "database error", "internal", http.StatusInternalServerError)
 		return
 	}

@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xmahdi1/nexus/internal/auth"
 	"github.com/xmahdi1/nexus/internal/httpx"
 )
 
@@ -82,14 +83,29 @@ func (rl *rateLimiter) cleanup() {
 	}
 }
 
-var loginLimiter = newRateLimiter(5, 15*time.Minute)
+var loginLimiter = newRateLimiter(30, 15*time.Minute)
 
 func LoginRateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !loginLimiter.allow(httpx.ClientIP(r, trustProxy)) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"error":"too many login attempts — try again in 15 minutes","code":"rate_limited"}`))
+			authError(w, 429, "rate_limited", "Too many login attempts. Try again in 15 minutes.")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+var credentialLimiter = newRateLimiter(5, time.Minute)
+
+func CredentialRateLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		access, ok := auth.FromContext(r.Context())
+		if !ok {
+			authError(w, 401, "missing_session", "Sign in again.")
+			return
+		}
+		if !credentialLimiter.allow(access.User.ID) {
+			authError(w, 429, "rate_limited", "Too many credential changes. Try again in a minute.")
 			return
 		}
 		next.ServeHTTP(w, r)

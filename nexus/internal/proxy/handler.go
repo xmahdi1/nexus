@@ -29,7 +29,6 @@ type DetectResult struct {
 }
 
 func NewHandler(db *gorm.DB, encKey []byte, pool *nexusssh.Pool) *Handler {
-	db.AutoMigrate(&models.ProxyRule{})
 	return &Handler{db: db, encKey: encKey, pool: pool}
 }
 

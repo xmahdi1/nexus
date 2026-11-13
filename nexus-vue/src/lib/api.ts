@@ -1,3 +1,13 @@
+export interface AccountUser {
+ id:string;username:string;displayName:string;email:string|null;status:string;admitted:boolean;mfaEnabled:boolean;recoveryRequired:boolean;createdAt:string;lastLoginAt:string|null
+}
+export interface RecoveryResult {ok:boolean;recoveryCodes:string[]}
+export interface MFAEnrollment {secret:string;uri:string;setupToken:string}
+export interface InviteInput {username:string;displayName:string;email:string;roleId:string;scopeType:string;scopeId:string;expiresHours:number;currentPassword:string}
+export interface DeviceSession {
+    id: string; createdAt: string; lastUsedAt: string; expiresAt: string; deviceLabel: string; clientIP: string
+}
+
 const BASE = '/api'
 
 export interface ApiError {
@@ -212,6 +222,8 @@ export interface FirewallStatus {
 }
 
 export interface ScheduledTask {
+    actorId: string;
+    createdBy: string;
     id: string;
     serverId: string;
     name: string;
@@ -228,13 +240,19 @@ export interface ScheduledTask {
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const res = await fetch(`${BASE}${path}`, {
         method,
+        signal: AbortSignal.timeout(60_000),
         credentials: 'include',
         headers: body ? {'Content-Type': 'application/json'} : {},
         body: body ? JSON.stringify(body) : undefined,
     })
+    return decodeResponse<T>(res,path)
+}
+
+async function decodeResponse<T>(res: Response,path: string): Promise<T> {
     if ((res.headers.get('content-type') ?? '').includes('text/html')) {
         window.dispatchEvent(new CustomEvent('nexus:connection-lost'))
-        return new Promise<T>(() => {
+        throw Object.assign(new Error('The access proxy returned an HTML page. Refresh the page and sign in to the proxy again.'), {
+            code: 'upstream_html', status: res.status,
         })
     }
     if (!res.ok) {
@@ -243,8 +261,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
             json = await res.json()
         } catch {
         }
-        if (res.status === 401 && !['/auth/login', '/auth/password', '/auth/mfa/verify'].includes(path)) {
-            localStorage.removeItem('nexus_authed')
+        if (res.status === 401 && !['/auth/invitations/accept','/auth/reset/info','/auth/reset/password','/auth/reset/mfa/setup','/auth/reset/mfa/confirm','/auth/mfa/recovery', '/auth/mfa/recovery-codes', '/auth/login', '/auth/password', '/auth/mfa/verify', '/auth/mfa/setup', '/auth/mfa/enable', '/auth/mfa/disable'].includes(path)) {
             window.location.href = '/login'
         }
         throw Object.assign(new Error(json.error ?? `HTTP ${res.status}`), json)
@@ -256,22 +273,53 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 export const api = {
     auth: {
-        login: (password: string) =>
-            request<{ ok: boolean }>('POST', '/auth/login', {password}),
+        login: (password: string, username = '', deviceLabel = '') =>
+            request<{ ok: boolean; mfaRequired: boolean; pendingToken?: string }>('POST', '/auth/login', {password, username, deviceLabel}),
         logout: () => request<{ ok: boolean }>('POST', '/auth/logout'),
-        me: () => request<{ ok: boolean }>('GET', '/auth/me'),
+        me: () => request<{ok: boolean; mode: string; user: {id: string; username: string; displayName: string}; session: DeviceSession}>('GET', '/auth/me'),
+        sessions: () => request<DeviceSession[]>('GET','/auth/sessions'),
+        revokeSession: (id: string) => request<void>('DELETE',`/auth/sessions/${encodeURIComponent(id)}`),
+        permissions: () => request<{global: Record<string,boolean>; servers: Record<string,string[]>}>('GET','/auth/permissions'),
+        logoutAll: () => request<{ok: boolean}>('POST','/auth/logout-all'),
         changePassword: (currentPassword: string, newPassword: string) =>
             request<{ ok: boolean }>('POST', '/auth/password', {currentPassword, newPassword}),
         auditLog: (limit?: number) =>
             request<LoginEvent[]>('GET', limit ? `/auth/audit?limit=${limit}` : '/auth/audit'),
-        mfaVerify: (pendingToken: string, code: string) =>
-            request<{ ok: boolean }>('POST', '/auth/mfa/verify', {pendingToken, code}),
-        mfaStatus: () => request<{ enabled: boolean }>('GET', '/auth/mfa/status'),
-        mfaSetup: () => request<{ secret: string; uri: string }>('POST', '/auth/mfa/setup'),
-        mfaEnable: (secret: string, code: string) =>
-            request<{ ok: boolean }>('POST', '/auth/mfa/enable', {secret, code}),
+        mfaVerify: (pendingToken: string, code: string, deviceLabel = '') =>
+            request<{ ok: boolean }>('POST', '/auth/mfa/verify', {pendingToken, code, deviceLabel}),
+        mfaStatus: () => request<{ enabled: boolean; recoveryCodesRemaining:number }>('GET', '/auth/mfa/status'),
+        mfaSetup: (currentPassword: string) => request<{ secret: string; uri: string; setupToken: string }>('POST', '/auth/mfa/setup', {currentPassword}),
+        mfaEnable: (setupToken: string, code: string) =>
+            request<RecoveryResult>('POST', '/auth/mfa/enable', {setupToken, code}),
+        recoveryLogin: (pendingToken:string,code:string,deviceLabel='') => request<{ok:boolean}>('POST','/auth/mfa/recovery',{pendingToken,code,deviceLabel}),
+        regenerateRecovery: (currentPassword:string) => request<RecoveryResult>('POST','/auth/mfa/recovery-codes',{currentPassword}),
         mfaDisable: (code: string) =>
             request<{ ok: boolean }>('POST', '/auth/mfa/disable', {code}),
+    },
+
+    accounts: {
+        users: () => request<AccountUser[]>('GET','/users'),
+        invitations: () => request<Array<{id:string;userId:string;expiresAt:string;redeemedAt:string|null;revokedAt:string|null}>>('GET','/users/invitations'),
+        invite: (input:InviteInput) => request<{token:string}>('POST','/users/invitations',input),
+        revokeInvite: (id:string,currentPassword:string) => request<void>('DELETE',`/users/invitations/${encodeURIComponent(id)}`,{currentPassword}),
+        status: (id:string,status:string,currentPassword:string) => request('PATCH',`/users/${encodeURIComponent(id)}`,{status,currentPassword}),
+        unlock: (id:string,currentPassword:string) => request('POST',`/users/${encodeURIComponent(id)}/unlock`,{currentPassword}),
+        requestReset: (id:string,kind:string,reason:string,currentPassword:string) => request<{token:string}>('POST',`/users/${encodeURIComponent(id)}/resets`,{kind,reason,currentPassword}),
+        accept: (token:string,password:string) => request<{ok:boolean;username:string}>('POST','/auth/invitations/accept',{token,password}),
+        resetInfo: (token:string) => request<{kind:string;username:string;mfaRequired:boolean}>('POST','/auth/reset/info',{token}),
+        resetPassword: (token:string,password:string,code:string) => request<RecoveryResult>('POST','/auth/reset/password',{token,password,code}),
+        resetMFASetup: (token:string,password:string) => request<MFAEnrollment>('POST','/auth/reset/mfa/setup',{token,password}),
+        resetMFAConfirm: (setupToken:string,code:string) => request<RecoveryResult>('POST','/auth/reset/mfa/confirm',{setupToken,code}),
+    },
+    access: {
+        roles: () => request<Array<{id: string; name: string; permissions: string[]}>>('GET','/roles'),
+        grants: () => request<Array<{id: string; principalId: string; principalKind: string; roleId: string; scopeType: string; scopeId: string; createdBy: string}>>('GET','/grants'),
+        groups: () => request<Array<{id: string; name: string; serverIds: string[]}>>('GET','/server-groups'),
+        addGrant: (principalId: string, roleId: string, scopeType: string, scopeId: string, currentPassword: string) => request('POST','/grants',{principalId,roleId,scopeType,scopeId,currentPassword}),
+        deleteGrant: (id: string, currentPassword: string) => request<void>('DELETE',`/grants/${encodeURIComponent(id)}`,{currentPassword}),
+        createGroup: (name: string, currentPassword: string) => request('POST','/server-groups',{name,currentPassword}),
+        deleteGroup: (id: string, currentPassword: string) => request<void>('DELETE',`/server-groups/${encodeURIComponent(id)}`,{currentPassword}),
+        membership: (group: string, server: string, remove: boolean, currentPassword: string) => request(remove ? 'DELETE' : 'PUT',`/server-groups/${encodeURIComponent(group)}/servers/${encodeURIComponent(server)}`,{currentPassword}),
     },
 
     keys: {
@@ -338,13 +386,8 @@ export const api = {
             form.append('file', file)
             return fetch(`/api/servers/${sid}/files/upload?path=${encodeURIComponent(dirPath)}`, {
                 method: 'POST', credentials: 'include', body: form,
-            }).then(async res => {
-                if (!res.ok) {
-                    const json = await res.json().catch(() => ({}))
-                    throw new Error(json.error ?? `Upload failed (${res.status})`)
-                }
-                return res.json()
-            })
+                signal: AbortSignal.timeout(60_000),
+            }).then(res => decodeResponse<{ok: boolean; path: string}>(res,'/files/upload'))
         },
         delete: (sid: string, path: string) =>
             request<void>('DELETE', `/servers/${sid}/files?path=${encodeURIComponent(path)}`),

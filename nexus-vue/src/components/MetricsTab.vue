@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Clock, Cpu, MemoryStick, HardDrive, ArrowDown, ArrowUp, Activity, Server, Bell, Loader2 } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import { api } from '@/lib/api'
+import { verifySession } from '@/lib/auth'
 import type { Metrics, ServerAlertConfig } from '@/lib/api'
 import SparkLine from './SparkLine.vue'
 import Button from '@/components/ui/Button.vue'
@@ -75,8 +76,13 @@ async function saveAlerts() {
 }
 
 let ws: WebSocket | null = null
+let disposed = false
+let retries = 0
+let reconnectTimer: ReturnType<typeof setTimeout> | undefined
 
-function connect() {
+async function connect() {
+  if (disposed || !await verifySession()) { error.value = 'Session expired. Sign in again.'; return }
+  if (disposed) return
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   ws = new WebSocket(`${proto}://${location.host}/ws/metrics/${props.serverId}`)
 
@@ -98,7 +104,10 @@ function connect() {
     if (history.value.length > MAX) history.value.shift()
   }
   ws.onerror  = () => { error.value = 'Connection error' }
-  ws.onclose  = () => { setTimeout(() => { if (ws?.readyState !== WebSocket.OPEN) connect() }, 3000) }
+  ws.onclose = () => {
+    if (disposed || retries >= 6) { if (!disposed) error.value = 'Connection closed. Reload to reconnect.'; return }
+    reconnectTimer = setTimeout(connect, Math.min(1000 * 2 ** retries++, 30_000))
+  }
 }
 
 onMounted(async () => {
@@ -117,7 +126,7 @@ onMounted(async () => {
   connect()
 })
 
-onUnmounted(() => { ws?.close(); ws = null })
+onUnmounted(() => { disposed = true; clearTimeout(reconnectTimer); ws?.close(); ws = null })
 </script>
 
 <template>

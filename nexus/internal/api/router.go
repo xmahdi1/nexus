@@ -1,7 +1,11 @@
 package api
 
 import (
+	"encoding/json"
+	"github.com/xmahdi1/nexus/internal/auth"
+	"github.com/xmahdi1/nexus/internal/authorization"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -26,12 +30,20 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 	nexusMW.SetTrustProxy(cfg.TrustProxy)
 
 	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.CleanPath)
+	r.Use(nexusMW.Security(cfg))
 	r.Use(corsMiddleware)
+	r.Use(nexusMW.Management(auth.NewService(db, cfg), authorization.New(db)))
+
+	r.Get("/health/live", liveness)
+	r.Get("/health/ready", readiness(db))
 
 	authH := handlers.NewAuthHandler(cfg, db)
+	policyH := handlers.NewAuthorizationHandler(db, cfg)
+	accountsH := handlers.NewAccountHandler(db, cfg)
 	serversH := handlers.NewServersHandler(db, cfg.EncryptionKey, pool, mon)
 	metricsH := metrics.NewHandler(db, cfg.EncryptionKey, pool)
 	dockerH := handlers.NewDockerHandler(db, cfg.EncryptionKey, pool)
@@ -50,18 +62,45 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 
 	r.With(nexusMW.LoginRateLimit).Post("/api/auth/login", authH.Login)
 	r.With(nexusMW.LoginRateLimit).Post("/api/auth/mfa/verify", authH.MFAVerify)
+	r.With(nexusMW.LoginRateLimit).Post("/api/auth/mfa/recovery", accountsH.RecoveryLogin)
+	r.With(nexusMW.LoginRateLimit).Post("/api/auth/invitations/accept", accountsH.Accept)
+	r.With(nexusMW.LoginRateLimit).Post("/api/auth/reset/info", accountsH.ResetInfo)
+	r.With(nexusMW.LoginRateLimit).Post("/api/auth/reset/password", accountsH.ResetPassword)
+	r.With(nexusMW.LoginRateLimit).Post("/api/auth/reset/mfa/setup", accountsH.ResetMFASetup)
+	r.With(nexusMW.LoginRateLimit).Post("/api/auth/reset/mfa/confirm", accountsH.ResetMFAConfirm)
 
 	r.Group(func(r chi.Router) {
-		r.Use(nexusMW.Require(cfg.EncryptionKey))
 
 		r.Post("/api/auth/logout", authH.Logout)
+		r.Get("/api/users", accountsH.Users)
+		r.Get("/api/users/invitations", accountsH.Invitations)
+		r.With(nexusMW.CredentialRateLimit).Post("/api/users/invitations", accountsH.Invite)
+		r.With(nexusMW.CredentialRateLimit).Delete("/api/users/invitations/{inviteId}", accountsH.RevokeInvite)
+		r.With(nexusMW.CredentialRateLimit).Patch("/api/users/{uid}", accountsH.Status)
+		r.With(nexusMW.CredentialRateLimit).Post("/api/users/{uid}/resets", accountsH.Reset)
+		r.With(nexusMW.CredentialRateLimit).Post("/api/users/{uid}/unlock", accountsH.Unlock)
+		r.With(nexusMW.CredentialRateLimit).Post("/api/auth/mfa/recovery-codes", accountsH.Regenerate)
 		r.Get("/api/auth/me", authH.Me)
-		r.Post("/api/auth/password", authH.ChangePassword)
+		r.Get("/api/auth/permissions", policyH.Permissions)
+		r.Get("/api/roles", policyH.Roles)
+		r.Get("/api/grants", policyH.Grants)
+		r.With(nexusMW.CredentialRateLimit).Post("/api/grants", policyH.AddGrant)
+		r.With(nexusMW.CredentialRateLimit).Delete("/api/grants/{grantId}", policyH.DeleteGrant)
+		r.Get("/api/server-groups", policyH.Groups)
+		r.With(nexusMW.CredentialRateLimit).Post("/api/server-groups", policyH.CreateGroup)
+		r.With(nexusMW.CredentialRateLimit).Put("/api/server-groups/{gid}/servers/{serverId}", policyH.Membership)
+		r.With(nexusMW.CredentialRateLimit).Delete("/api/server-groups/{gid}/servers/{serverId}", policyH.Membership)
+		r.With(nexusMW.CredentialRateLimit).Delete("/api/server-groups/{gid}", policyH.DeleteGroup)
+		r.Get("/api/authorization/events", policyH.Events)
+		r.Get("/api/auth/sessions", authH.Sessions)
+		r.Delete("/api/auth/sessions/{sid}", authH.RevokeSession)
+		r.Post("/api/auth/logout-all", authH.LogoutAll)
+		r.With(nexusMW.CredentialRateLimit).Post("/api/auth/password", authH.ChangePassword)
 		r.Get("/api/auth/audit", authH.AuditLog)
 		r.Get("/api/auth/mfa/status", authH.MFAStatus)
-		r.Post("/api/auth/mfa/setup", authH.MFASetup)
-		r.Post("/api/auth/mfa/enable", authH.MFAEnable)
-		r.Post("/api/auth/mfa/disable", authH.MFADisable)
+		r.With(nexusMW.CredentialRateLimit).Post("/api/auth/mfa/setup", authH.MFASetup)
+		r.With(nexusMW.CredentialRateLimit).Post("/api/auth/mfa/enable", authH.MFAEnable)
+		r.With(nexusMW.CredentialRateLimit).Post("/api/auth/mfa/disable", authH.MFADisable)
 
 		r.Post("/api/keys/generate", serversH.GenerateKey)
 		r.Get("/api/servers", serversH.List)
@@ -92,7 +131,7 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 		r.Delete("/api/servers/{id}/files", filesH.Delete)
 		r.Post("/api/servers/{id}/files/mkdir", filesH.Mkdir)
 		r.Put("/api/servers/{id}/files", filesH.Write)
-		
+
 		r.Get("/api/servers/{id}/proxy/detect", proxyH.Detect)
 		r.Get("/api/servers/{id}/proxy", proxyH.List)
 		r.Post("/api/servers/{id}/proxy", proxyH.Create)
@@ -145,7 +184,15 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 	})
 
 	if h := static.DefaultHandler(cfg.StaticDir); h != nil {
-		r.Handle("/*", h)
+		r.Handle("/*", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]string{"error": "Not found.", "code": "not_found", "request_id": w.Header().Get("X-Request-ID")})
+				return
+			}
+			h.ServeHTTP(w, r)
+		}))
 	}
 	return r
 }
