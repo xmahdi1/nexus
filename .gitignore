@@ -29,3 +29,7 @@ Thumbs.db
 vendor/nexus/internal/static/dist/
 nexus/internal/static/dist/
 docs/
+
+# Python lab runner bytecode
+__pycache__/
+*.py[cod]
