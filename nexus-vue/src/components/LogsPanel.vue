@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {ref, watch, onUnmounted, nextTick, computed} from 'vue'
 import {X, Loader2, FileX} from '@lucide/vue'
+import {can,verifySession} from '@/lib/auth'
 import {api} from '@/lib/api'
 import Button from './ui/Button.vue'
 
@@ -18,6 +19,8 @@ const rawLines = ref<string[]>([])
 const connecting = ref(false)
 const connected = ref(false)
 let ws: WebSocket | null = null
+let generation=0
+let disposed=false
 let lineBuffer = ''
 
 interface LogLine {
@@ -49,21 +52,26 @@ const lines = computed<LogLine[]>(() =>
     }),
 )
 
-function connect() {
-  if (ws) return
+async function connect() {
+  if (ws || disposed) return
+  const current=++generation
+  if (!await verifySession() || !can('logs.read',props.serverId) || disposed || current!==generation || !props.open) {connecting.value=false;return}
   connecting.value = true
   connected.value = false
   rawLines.value = []
   lineBuffer = ''
 
-  ws = new WebSocket(api.ws.logs(props.serverId, props.containerId))
+  const socket = new WebSocket(api.ws.logs(props.serverId, props.containerId))
+  ws=socket
 
-  ws.onopen = () => {
+  socket.onopen = () => {
+    if(ws!==socket)return
     connecting.value = false;
     connected.value = true
   }
 
-  ws.onmessage = (e) => {
+  socket.onmessage = (e) => {
+    if(ws!==socket)return
     const chunk = typeof e.data === 'string' ? e.data : new TextDecoder().decode(e.data as ArrayBuffer)
     const text = stripAnsi(lineBuffer + chunk)
     const parts = text.split('\n')
@@ -76,7 +84,9 @@ function connect() {
     }
   }
 
-  ws.onclose = () => {
+  socket.onclose = () => {
+    if(ws!==socket)return
+    connected.value=false
     connecting.value = false
     if (lineBuffer.trim()) {
       rawLines.value.push(stripAnsi(lineBuffer));
@@ -85,14 +95,18 @@ function connect() {
     ws = null
   }
 
-  ws.onerror = () => {
+  socket.onerror = () => {
+    if(ws!==socket)return
+    socket.close()
     connecting.value = false;
     rawLines.value.push('[connection error]');
-    ws = null
   }
 }
 
 function disconnect() {
+  generation++
+  if(ws){ws.onclose=null;ws.onerror=null;ws.onmessage=null;ws.onopen=null}
+  connecting.value=false;connected.value=false
   ws?.close();
   ws = null
 }
@@ -104,7 +118,7 @@ function scrollToBottom() {
 watch(() => props.open, (open) => {
   if (open) connect(); else disconnect()
 }, {immediate: true})
-onUnmounted(() => disconnect())
+onUnmounted(() => {disposed=true;disconnect()})
 </script>
 
 <template>
