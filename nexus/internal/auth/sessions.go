@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xmahdi1/nexus/internal/authorization"
 	"github.com/xmahdi1/nexus/internal/config"
 	nexuscrypto "github.com/xmahdi1/nexus/internal/crypto"
 	"github.com/xmahdi1/nexus/internal/identity"
@@ -220,6 +221,9 @@ func (s *Service) issue(tx *gorm.DB, a account, device, ip string, mfa bool) (st
 			return "", err
 		}
 	}
+	if err := authorization.New(tx).Record(a.User.ID, "auth.session.issue", session.ID, "succeeded", "", session.ID); err != nil {
+		return "", err
+	}
 	return token, nil
 }
 
@@ -340,6 +344,23 @@ func (s *Service) Authenticate(token string) (*Access, error) {
 	return access, err
 }
 
+// AuthorizedNow rechecks the stored session and current authorization without
+// refreshing idle expiry. Sensitive HTTP responses must not rely only on the
+// periodic stream watcher when a session was revoked just before completion.
+func (access *Access) AuthorizedNow() bool {
+	if access == nil || access.service == nil {
+		return false
+	}
+	var session Session
+	if err := access.service.DB.First(&session, "id=?", access.Session.ID).Error; err != nil {
+		return false
+	}
+	if _, err := access.service.validate(access.service.DB, session); err != nil {
+		return false
+	}
+	return access.CheckAuthorization == nil || access.CheckAuthorization()
+}
+
 // WatchAccess closes privileged streams after revocation, expiry or disablement.
 // Traffic does not refresh idle expiry: a fresh HTTP session check must do that.
 func WatchAccess(r *http.Request, closeStream func()) func() {
@@ -360,12 +381,7 @@ func WatchAccess(r *http.Request, closeStream func()) func() {
 				closeStream()
 				return
 			case <-ticker.C:
-				var session Session
-				if err := access.service.DB.First(&session, "id=?", access.Session.ID).Error; err != nil {
-					closeStream()
-					return
-				}
-				if _, err := access.service.validate(access.service.DB, session); err != nil || (access.CheckAuthorization != nil && !access.CheckAuthorization()) {
+				if !access.AuthorizedNow() {
 					closeStream()
 					return
 				}

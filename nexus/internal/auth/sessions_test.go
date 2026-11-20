@@ -47,6 +47,25 @@ func mustLogin(t *testing.T, s *Service, username, password string) string {
 	}
 	return result.Token
 }
+
+func TestAuthorizedNowRejectsRevocationWithoutWaitingForWatcher(t *testing.T) {
+	service, _ := sessionFixture(t)
+	access := mustAccess(t, service, mustLogin(t, service, "", "current legacy password"))
+	if !access.AuthorizedNow() {
+		t.Fatal("live session rejected")
+	}
+	access.CheckAuthorization = func() bool { return false }
+	if access.AuthorizedNow() {
+		t.Fatal("revoked permissions accepted")
+	}
+	access.CheckAuthorization = func() bool { return true }
+	if err := service.Revoke(access, access.Session.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if access.AuthorizedNow() {
+		t.Fatal("revoked session accepted before watcher tick")
+	}
+}
 func mustAccess(t *testing.T, s *Service, token string) *Access {
 	t.Helper()
 	a, err := s.Authenticate(token)

@@ -61,6 +61,6 @@ func (s *Service) loginFailure(tx *gorm.DB, id string) error {
 func (s *Service) clearFailures(tx *gorm.DB, id string) error {
 	return tx.Where("key_hash=?", tokenHash("login-limit:"+id)).Delete(&loginLimit{}).Error
 }
-func (s *Service) event(tx *gorm.DB, actor, action, outcome string) error {
-	return authorization.New(tx).Record(actor, action, actor, outcome, "")
+func (s *Service) event(tx *gorm.DB, actor, action, outcome string, sessions ...string) error {
+	return authorization.New(tx).Record(actor, action, actor, outcome, "", sessions...)
 }
