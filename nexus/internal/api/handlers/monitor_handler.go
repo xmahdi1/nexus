@@ -96,8 +96,13 @@ func (h *MonitorHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 		updates["notify_container"] = *body.NotifyContainer
 	}
 
-	h.db.Model(&cfg).Updates(updates)
-	h.mon.ReloadBot()
+	if err := h.db.Model(&cfg).Updates(updates).Error; err != nil {
+		writeErr(w, "Could not save monitor configuration.", "storage_unavailable", 503)
+		return
+	}
+	if h.mon != nil {
+		h.mon.ReloadBot()
+	}
 
 	h.db.First(&cfg, "id = ?", "default")
 	if cfg.TelegramToken != "" {
@@ -148,9 +153,14 @@ func (h *MonitorHandler) AddMonitored(w http.ResponseWriter, r *http.Request) {
 	}
 	var existing models.MonitoredContainer
 	if h.db.First(&existing, "server_id = ? AND name = ?", serverID, body.Name).Error == nil {
-		h.db.Model(&existing).Update("container_id", body.ContainerID)
+		if err := h.db.Model(&existing).Update("container_id", body.ContainerID).Error; err != nil {
+			writeErr(w, "Could not update monitored container.", "storage_unavailable", 503)
+			return
+		}
 		existing.ContainerID = body.ContainerID
-		go h.mon.SeedContainer(serverID, body.ContainerID, body.Name)
+		if h.mon != nil {
+			go h.mon.SeedContainer(serverID, body.ContainerID, body.Name)
+		}
 		writeJSON(w, existing, http.StatusOK)
 		return
 	}
@@ -163,16 +173,24 @@ func (h *MonitorHandler) AddMonitored(w http.ResponseWriter, r *http.Request) {
 		ContainerID: body.ContainerID,
 		Name:        body.Name,
 	}
-	h.db.Create(&mc)
+	if err := h.db.Create(&mc).Error; err != nil {
+		writeErr(w, "Could not save monitored container.", "storage_unavailable", 503)
+		return
+	}
 
-	go h.mon.SeedContainer(serverID, body.ContainerID, body.Name)
+	if h.mon != nil {
+		go h.mon.SeedContainer(serverID, body.ContainerID, body.Name)
+	}
 
 	writeJSON(w, mc, http.StatusCreated)
 }
 
 func (h *MonitorHandler) RemoveMonitored(w http.ResponseWriter, r *http.Request) {
-	h.db.Delete(&models.MonitoredContainer{},
-		"server_id = ? AND name = ?", chi.URLParam(r, "id"), chi.URLParam(r, "containerId"))
+	if err := h.db.Delete(&models.MonitoredContainer{},
+		"server_id = ? AND name = ?", chi.URLParam(r, "id"), chi.URLParam(r, "containerId")).Error; err != nil {
+		writeErr(w, "Could not remove monitored container.", "storage_unavailable", 503)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -203,9 +221,12 @@ func (h *MonitorHandler) UpdateServerAlerts(w http.ResponseWriter, r *http.Reque
 
 	var existing models.ServerAlertConfig
 	if h.db.First(&existing, "id = ?", serverID).Error != nil {
-		h.db.Create(&body)
+		if err := h.db.Create(&body).Error; err != nil {
+			writeErr(w, "Could not save server alert configuration.", "storage_unavailable", 503)
+			return
+		}
 	} else {
-		h.db.Model(&existing).Updates(map[string]any{
+		if err := h.db.Model(&existing).Updates(map[string]any{
 			"cpu_enabled":     body.CPUEnabled,
 			"cpu_threshold":   body.CPUThreshold,
 			"ram_enabled":     body.RAMEnabled,
@@ -215,7 +236,10 @@ func (h *MonitorHandler) UpdateServerAlerts(w http.ResponseWriter, r *http.Reque
 			"ssl_enabled":     body.SSLEnabled,
 			"ssl_days_before": body.SSLDaysBefore,
 			"updated_at":      body.UpdatedAt,
-		})
+		}).Error; err != nil {
+			writeErr(w, "Could not update server alerts.", "storage_unavailable", 503)
+			return
+		}
 		h.db.First(&body, "id = ?", serverID)
 	}
 	writeJSON(w, body, http.StatusOK)
