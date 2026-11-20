@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"context"
 	"io"
 	"log"
 	"net/http"
@@ -41,6 +42,10 @@ func (h *LogsHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	defer nexusauth.WatchAccess(r, cancel)()
+
 	serverID := chi.URLParam(r, "id")
 	containerID := chi.URLParam(r, "cid")
 
@@ -56,7 +61,7 @@ func (h *LogsHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sshClient, err := h.pool.Get(nexusssh.ServerConfig{
+	sshClient, err := h.pool.GetContext(ctx, nexusssh.ServerConfig{
 		ID:      server.ID,
 		Host:    server.Host,
 		Port:    server.Port,
@@ -68,7 +73,7 @@ func (h *LogsHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stream, err := NewClient(sshClient).LogsStream(containerID, 200)
+	stream, err := NewClientContext(ctx, sshClient).LogsStream(containerID, 200)
 	if err != nil {
 		http.Error(w, "logs: "+err.Error(), http.StatusBadGateway)
 		return
@@ -82,7 +87,8 @@ func (h *LogsHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 	conn.SetReadLimit(64 << 10)
-	defer nexusauth.WatchAccess(r, func() { conn.Close(); stream.Close() })()
+	stop := context.AfterFunc(ctx, func() { conn.Close(); stream.Close() })
+	defer stop()
 
 	var mu sync.Mutex
 	write := func(data []byte) {
