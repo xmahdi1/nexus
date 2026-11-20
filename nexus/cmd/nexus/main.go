@@ -115,7 +115,7 @@ func main() {
 	mon := monitor.New(database, []byte(cfg.EncryptionKey), pool)
 	mon.Start()
 
-	sched := scheduler.New(database, []byte(cfg.EncryptionKey), pool)
+	sched := scheduler.New(database, []byte(cfg.EncryptionKey), pool, cfg.JobSupervisionEnabled)
 	sched.Start()
 
 	router := api.NewRouter(database, cfg, pool, mon)

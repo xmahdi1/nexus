@@ -203,3 +203,18 @@ func TestInvitedActorDisablementStopsQueuedAndRunningTasks(t *testing.T) {
 		t.Fatal("queued task not denied", stored.LastStatus)
 	}
 }
+
+func TestProtectedTargetDoesNotRunWithoutInteractiveProof(t *testing.T) {
+	s, task := schedulerFixture(t)
+	if err := s.db.Exec(`INSERT INTO server_groups(id,name,require_mfa,created_at) VALUES('protected','Production',1,CURRENT_TIMESTAMP);INSERT INTO server_group_members(group_id,server_id)VALUES('protected','dev')`).Error; err != nil {
+		t.Fatal(err)
+	}
+	executed := false
+	s.execute = func(context.Context, models.ScheduledTask) (string, error) { executed = true; return "", nil }
+	s.runTask(task)
+	var stored models.ScheduledTask
+	s.db.First(&stored, "id=?", task.ID)
+	if executed || stored.LastStatus != "denied" {
+		t.Fatal("protected target ran unattended")
+	}
+}

@@ -18,32 +18,44 @@ import (
 )
 
 type Scheduler struct {
-	db     *gorm.DB
-	encKey []byte
-	pool   *nexusssh.Pool
-	slots  chan struct{}
+	db                *gorm.DB
+	encKey            []byte
+	pool              *nexusssh.Pool
+	supervisedEnabled bool
+	activeSupervised  sync.Map
+	reconcileSlots    chan struct{}
+	slots             chan struct{}
 	// Injection boundary used only by local tests; production uses execSSH.
 	execute func(context.Context, models.ScheduledTask) (string, error)
 }
 
-func New(db *gorm.DB, key []byte, pool *nexusssh.Pool) *Scheduler {
-	s := &Scheduler{db: db, encKey: key, pool: pool, slots: make(chan struct{}, 4)}
+func New(db *gorm.DB, key []byte, pool *nexusssh.Pool, enabled ...bool) *Scheduler {
+	s := &Scheduler{db: db, encKey: key, pool: pool, slots: make(chan struct{}, 4), reconcileSlots: make(chan struct{}, 2)}
 	s.execute = s.execSSH
+	if len(enabled) > 0 {
+		s.supervisedEnabled = enabled[0]
+	}
 	return s
 }
 func (s *Scheduler) Start() {
 	go func() {
 		s.runDueTasks()
-		ticker := time.NewTicker(30 * time.Second)
+		lastDue := time.Now()
+		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			s.runDueTasks()
+		for now := range ticker.C {
+			s.reconcileSupervised()
+			if now.Sub(lastDue) >= 30*time.Second {
+				s.runDueTasks()
+				lastDue = now
+			}
 		}
 	}()
 }
 func (s *Scheduler) runDueTasks() {
+	s.reconcileSupervised()
 	// Never silently retry an execution whose outcome is uncertain after a crash.
-	if err := s.db.Model(&models.ScheduledTask{}).Where("last_status='running' AND (lease_until IS NULL OR julianday(lease_until)<=julianday(?))", time.Now().UTC()).Updates(map[string]any{"last_status": "interrupted", "enabled": false, "run_id": "", "lease_until": nil, "last_output": "Execution lease expired; review remote state before enabling again."}).Error; err != nil {
+	if err := s.db.Model(&models.ScheduledTask{}).Where("supervised=0 AND last_status='running' AND (lease_until IS NULL OR julianday(lease_until)<=julianday(?))", time.Now().UTC()).Updates(map[string]any{"last_status": "interrupted", "enabled": false, "run_id": "", "lease_until": nil, "last_output": "Execution lease expired; review remote state before enabling again."}).Error; err != nil {
 		return
 	}
 	var tasks []models.ScheduledTask
@@ -60,6 +72,10 @@ func (s *Scheduler) runDueTasks() {
 	}
 }
 func permitted(db *gorm.DB, task models.ScheduledTask) bool {
+	protected, err := authorization.New(db).Protected(task.ServerID)
+	if err != nil || protected {
+		return false
+	}
 	return authorization.New(db).All(task.ActorID, task.ServerID, "jobs.execute", "servers.execute", "secrets.use")
 }
 func (s *Scheduler) runTask(candidate models.ScheduledTask) {
@@ -76,6 +92,19 @@ func (s *Scheduler) runTask(candidate models.ScheduledTask) {
 		if running > 0 {
 			return nil
 		}
+		var unresolved int64
+		if err := tx.Model(&models.SupervisedRun{}).Where("server_id=? AND finished_at IS NULL", task.ServerID).Count(&unresolved).Error; err != nil {
+			return err
+		}
+		if unresolved > 0 {
+			return nil
+		}
+		if task.Supervised && !s.supervisedEnabled {
+			if err := tx.Model(&task).Updates(map[string]any{"last_status": "denied", "last_output": "Job supervision is disabled.", "enabled": false}).Error; err != nil {
+				return err
+			}
+			return authorization.New(tx).Record(task.ActorID, "tasks.execute", task.ID, "denied", "")
+		}
 		if !permitted(tx, task) {
 			next := time.Now().UTC().Add(time.Duration(max(task.IntervalMinutes, 1)) * time.Minute)
 			if err := tx.Model(&task).Updates(map[string]any{"last_status": "denied", "last_output": "Execution denied by current authorization.", "next_run_at": next}).Error; err != nil {
@@ -91,12 +120,21 @@ func (s *Scheduler) runTask(candidate models.ScheduledTask) {
 		if err := tx.Model(&task).Updates(map[string]any{"last_status": "running", "run_id": task.RunID, "lease_until": time.Now().UTC().Add(11 * time.Minute)}).Error; err != nil {
 			return err
 		}
+		if task.Supervised {
+			if err := s.prepareSupervised(tx, task); err != nil {
+				return err
+			}
+		}
 		if err := authorization.New(tx).Record(task.ActorID, "tasks.execute", task.ID, "started", task.RunID); err != nil {
 			return err
 		}
 		claimed = true
 		return nil
 	}); err != nil || !claimed {
+		return
+	}
+	if task.Supervised {
+		s.runSupervised(task, true)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
