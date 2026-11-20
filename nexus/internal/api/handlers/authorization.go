@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"github.com/xmahdi1/nexus/internal/audit"
 	"net/http"
 	"sort"
 
@@ -118,7 +119,13 @@ func (h *AuthorizationHandler) proof(w http.ResponseWriter, r *http.Request) (au
 	return input, a, true
 }
 func (h *AuthorizationHandler) failure(w http.ResponseWriter, err error) {
-	if errors.Is(err, authorization.ErrDenied) {
+	if errors.Is(err, auth.ErrCredentials) {
+		writeErr(w, "Invalid password or factor.", "invalid_credentials", 401)
+	} else if errors.Is(err, auth.ErrUnauthorized) {
+		writeErr(w, "Session expired.", "invalid_session", 401)
+	} else if errors.Is(err, auth.ErrStepUp) {
+		writeErr(w, "Verify MFA again.", "step_up_required", 403)
+	} else if errors.Is(err, authorization.ErrDenied) {
 		writeErr(w, "Access denied.", "permission_denied", 403)
 	} else if errors.Is(err, authorization.ErrLastAdmin) {
 		writeErr(w, err.Error(), "last_administrator", 409)
@@ -145,6 +152,7 @@ func (h *AuthorizationHandler) AddGrant(w http.ResponseWriter, r *http.Request) 
 		h.failure(w, err)
 		return
 	}
+	audit.MarkResource(r.Context(), "grant", grant.ID)
 	writeJSON(w, grant, 201)
 }
 func (h *AuthorizationHandler) DeleteGrant(w http.ResponseWriter, r *http.Request) {
@@ -168,6 +176,7 @@ func (h *AuthorizationHandler) CreateGroup(w http.ResponseWriter, r *http.Reques
 		h.failure(w, err)
 		return
 	}
+	audit.MarkResource(r.Context(), "server_group", group.ID)
 	writeJSON(w, group, 201)
 }
 func (h *AuthorizationHandler) Membership(w http.ResponseWriter, r *http.Request) {

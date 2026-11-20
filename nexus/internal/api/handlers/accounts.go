@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"github.com/xmahdi1/nexus/internal/audit"
 	"net/http"
 	"time"
 
@@ -46,6 +47,10 @@ func (h *AccountHandler) proof(w http.ResponseWriter, r *http.Request) (accountI
 		return input, a, false
 	}
 	if err := h.service.RequirePassword(a, input.CurrentPassword); err != nil {
+		if errors.Is(err, auth.ErrCredentials) || errors.Is(err, auth.ErrStepUp) {
+			writeErr(w, "Confirm the current password and recent MFA.", "step_up_required", 403)
+			return input, a, false
+		}
 		h.fail(w, err)
 		return input, a, false
 	}
@@ -89,6 +94,7 @@ func (h *AccountHandler) Invite(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
+	audit.MarkResource(r.Context(), "invitation", result.Invitation.ID)
 	writeJSON(w, result, 201)
 }
 func (h *AccountHandler) RevokeInvite(w http.ResponseWriter, r *http.Request) {
