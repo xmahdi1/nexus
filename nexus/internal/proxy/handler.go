@@ -1,16 +1,22 @@
 package proxy
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/xmahdi1/nexus/internal/audit"
+	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/xmahdi1/nexus/internal/config"
 	nexuscrypto "github.com/xmahdi1/nexus/internal/crypto"
 	"github.com/xmahdi1/nexus/internal/models"
 	nexusssh "github.com/xmahdi1/nexus/internal/ssh"
@@ -21,6 +27,7 @@ type Handler struct {
 	db     *gorm.DB
 	encKey []byte
 	pool   *nexusssh.Pool
+	acme   config.ACMEConfig
 }
 
 type DetectResult struct {
@@ -28,28 +35,62 @@ type DetectResult struct {
 	Version   string `json:"version"`
 }
 
-func NewHandler(db *gorm.DB, encKey []byte, pool *nexusssh.Pool) *Handler {
-	return &Handler{db: db, encKey: encKey, pool: pool}
+func NewHandler(db *gorm.DB, encKey []byte, pool *nexusssh.Pool, options ...config.ACMEConfig) *Handler {
+	h := &Handler{db: db, encKey: encKey, pool: pool}
+	if len(options) > 0 {
+		h.acme = options[0]
+	}
+	return h
 }
 
 var domainRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$`)
 var domainWildcardRe = regexp.MustCompile(`^\*\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$`)
-var targetRe = regexp.MustCompile(`^[a-zA-Z0-9.-]+:[0-9]{1,5}$`)
+
+var targetPortDigits = regexp.MustCompile(`^[0-9]{1,5}$`)
+var hostnameLabel = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
 var emailRe = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
 
 func validDomain(d string) bool {
-	return domainRe.MatchString(d) || domainWildcardRe.MatchString(d)
+	return len(d) <= 253 && (domainRe.MatchString(d) || domainWildcardRe.MatchString(d))
 }
 
-func validTarget(t string) bool {
-	return targetRe.MatchString(t)
+func validTarget(target string) bool {
+	host, portText, err := net.SplitHostPort(target)
+	port, parseErr := strconv.Atoi(portText)
+	if err != nil || parseErr != nil || !targetPortDigits.MatchString(portText) || port < 1 || port > 65535 || host == "" {
+		return false
+	}
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	host = strings.TrimSuffix(host, ".")
+	if len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if !hostnameLabel.MatchString(label) {
+			return false
+		}
+	}
+	return true
 }
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-func (h *Handler) ssh(serverID string) (func(string) (string, error), error) {
+func (h *Handler) ssh(ctx context.Context, serverID string) (func(string) (string, error), error) {
+	send, err := h.sshInput(ctx, serverID)
+	if err != nil {
+		return nil, err
+	}
+	return func(command string) (string, error) { return send(command, "") }, nil
+}
+func (h *Handler) sshInput(ctx context.Context, serverID string) (func(string, string) (string, error), error) {
+	policy, err := acmeCommandPolicy(h.acme)
+	if err != nil {
+		return nil, err
+	}
 	var server models.Server
 	if err := h.db.First(&server, "id = ?", serverID).Error; err != nil {
 		return nil, fmt.Errorf("server not found")
@@ -58,27 +99,21 @@ func (h *Handler) ssh(serverID string) (func(string) (string, error), error) {
 	if err != nil {
 		return nil, fmt.Errorf("key decrypt failed")
 	}
-	client, err := h.pool.Get(nexusssh.ServerConfig{
+	client, err := h.pool.GetContext(ctx, nexusssh.ServerConfig{
 		ID: server.ID, Host: server.Host, Port: server.Port,
 		User: server.Username, PrivKey: privKey,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ssh: %w", err)
 	}
-	return func(cmd string) (string, error) {
-		sess, err := client.NewSession()
-		if err != nil {
-			h.pool.Remove(serverID)
-			return "", err
-		}
-		defer sess.Close()
-		out, err := sess.CombinedOutput(cmd)
-		return strings.TrimSpace(string(out)), err
+	return func(cmd, input string) (string, error) {
+		out, err := nexusssh.Run(ctx, client, policy(cmd), strings.NewReader(input), nexusssh.CommandTimeout)
+		return strings.TrimSpace(out), err
 	}, nil
 }
 
 func (h *Handler) Detect(w http.ResponseWriter, r *http.Request) {
-	run, err := h.ssh(chi.URLParam(r, "id"))
+	run, err := h.ssh(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeErr(w, err.Error(), http.StatusBadGateway)
 		return
@@ -119,6 +154,10 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "domain, target and proxyType are required", http.StatusBadRequest)
 		return
 	}
+	if body.ProxyType != "nginx" && body.ProxyType != "caddy" {
+		writeErr(w, "Unsupported proxy type.", 400)
+		return
+	}
 	if !validDomain(body.Domain) {
 		writeErr(w, "invalid domain format", http.StatusBadRequest)
 		return
@@ -127,7 +166,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "target must be host:port", http.StatusBadRequest)
 		return
 	}
-	run, err := h.ssh(serverID)
+	run, err := h.ssh(r.Context(), serverID)
 	if err != nil {
 		writeErr(w, err.Error(), http.StatusBadGateway)
 		return
@@ -178,6 +217,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if body.SSL && !sslOK {
+		audit.MarkFailed(r.Context())
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]any{
@@ -189,6 +229,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	audit.MarkResource(r.Context(), "proxy_rule", rule.ID)
 	writeJSON(w, rule, http.StatusCreated)
 }
 
@@ -210,6 +251,10 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
+	if body.ProxyType != "nginx" && body.ProxyType != "caddy" {
+		writeErr(w, "Unsupported proxy type.", 400)
+		return
+	}
 	if !validDomain(body.Domain) {
 		writeErr(w, "invalid domain format", http.StatusBadRequest)
 		return
@@ -218,28 +263,33 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "target must be host:port", http.StatusBadRequest)
 		return
 	}
-	run, err := h.ssh(serverID)
+	if body.ProxyType != rule.ProxyType {
+		writeErr(w, "Create and verify a replacement route before removing the original when changing proxy implementations.", 409)
+		return
+	}
+	if rule.ProxyType == "nginx" && rule.SSLEnabled && (body.Domain != rule.Domain || !body.SSL) {
+		writeErr(w, "Create and verify a replacement route before changing the domain or disabling TLS on an existing certificate-managed route.", 409)
+		return
+	}
+	run, err := h.ssh(r.Context(), serverID)
 	if err != nil {
 		writeErr(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	var updateErr error
 	switch rule.ProxyType {
 	case "nginx":
-		deleteNginxRule(run, rule.ID, rule.Domain)
+		if rule.SSLEnabled {
+			updateErr = updateNginxTarget(run, rule.ID, body.Target)
+		} else {
+			updateErr = createNginxRule(run, rule.ID, body.Domain, body.Target, body.SSL)
+		}
 	case "caddy":
-		deleteCaddyRule(run, rule.Domain)
+		updateErr = updateCaddyRule(run, rule.Domain, body.Domain, body.Target)
 	}
-	switch body.ProxyType {
-	case "nginx":
-		if err := createNginxRule(run, rule.ID, body.Domain, body.Target, body.SSL); err != nil {
-			writeErr(w, "nginx: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-	case "caddy":
-		if err := createCaddyRule(run, body.Domain, body.Target); err != nil {
-			writeErr(w, "caddy: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+	if updateErr != nil {
+		writeErr(w, "Proxy update failed; inspect the previous route before retrying. "+updateErr.Error(), 502)
+		return
 	}
 
 	sslOK := rule.SSLEnabled
@@ -258,10 +308,16 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		sslOK = false
 	}
 
-	h.db.Model(&rule).Updates(map[string]any{
+	if err := h.db.Model(&rule).Updates(map[string]any{
 		"domain": body.Domain, "target": body.Target,
 		"proxy_type": body.ProxyType, "ssl_enabled": sslOK,
-	})
+	}).Error; err != nil {
+		writeErr(w, "Could not save the updated rule.", 500)
+		return
+	}
+	if body.SSL && !sslOK {
+		audit.MarkFailed(r.Context())
+	}
 	rule.Domain = body.Domain
 	rule.Target = body.Target
 	rule.ProxyType = body.ProxyType
@@ -277,18 +333,27 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	run, err := h.ssh(serverID)
+	run, err := h.ssh(r.Context(), serverID)
 	if err != nil {
 		writeErr(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	switch rule.ProxyType {
 	case "nginx":
-		deleteNginxRule(run, rule.ID, rule.Domain)
+		if err := deleteNginxRule(run, rule.ID, rule.Domain); err != nil {
+			writeErr(w, "Could not remove the old nginx rule.", 502)
+			return
+		}
 	case "caddy":
-		deleteCaddyRule(run, rule.Domain)
+		if err := deleteCaddyRule(run, rule.Domain); err != nil {
+			writeErr(w, "Could not remove the old Caddy rule.", 502)
+			return
+		}
 	}
-	h.db.Delete(&rule)
+	if err := h.db.Delete(&rule).Error; err != nil {
+		writeErr(w, "Could not remove the stored rule.", 500)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -304,8 +369,28 @@ func (h *Handler) EnableSSL(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 		Wildcard bool   `json:"wildcard"`
 		CFToken  string `json:"cfToken"`
+		Renew    bool   `json:"renew"`
 	}
-	json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.Renew && !rule.SSLEnabled {
+		writeErr(w, "renewal requires an existing enabled certificate", http.StatusBadRequest)
+		return
+	}
+	if body.Wildcard && rule.ProxyType != "nginx" {
+		writeErr(w, "DNS certificate management requires nginx", http.StatusBadRequest)
+		return
+	}
+	if rule.ProxyType != "nginx" && rule.ProxyType != "caddy" {
+		writeErr(w, "unsupported proxy type", http.StatusBadRequest)
+		return
+	}
+	if body.Wildcard && (body.CFToken == "" || len(body.CFToken) > 4096 || strings.ContainsAny(body.CFToken, "\r\n\x00")) {
+		writeErr(w, "a valid Cloudflare API token is required for DNS certificates", http.StatusBadRequest)
+		return
+	}
 	if body.Email == "" {
 		body.Email = "admin@" + rule.Domain
 	}
@@ -313,26 +398,35 @@ func (h *Handler) EnableSSL(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "invalid email format", http.StatusBadRequest)
 		return
 	}
-	run, err := h.ssh(serverID)
+	send, err := h.sshInput(r.Context(), serverID)
 	if err != nil {
 		writeErr(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	run := func(command string) (string, error) { return send(command, "") }
 	var output string
 	var sslErr error
 	if body.Wildcard {
-		if body.CFToken == "" {
-			writeErr(w, "Cloudflare API token required for wildcard certificates", http.StatusBadRequest)
-			return
-		}
-		output, sslErr = enableWildcardSSL(run, rule, body.Email, body.CFToken)
+		output, sslErr = enableWildcardSSLWithRenewal(run, send, rule, body.Email, body.CFToken, body.Renew, func(command string) (string, error) {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+			defer cancel()
+			cleanup, err := h.ssh(ctx, serverID)
+			if err != nil {
+				return "", err
+			}
+			return cleanup(command)
+		})
 	} else {
 		switch rule.ProxyType {
 		case "nginx":
-			output, sslErr = run(fmt.Sprintf(
-				`PATH="$PATH:/usr/bin:/usr/local/bin" certbot --nginx -d %s --non-interactive --agree-tos --redirect -m %s 2>&1`,
-				shellQuote(rule.Domain), shellQuote(body.Email),
-			))
+			if body.Renew {
+				output, sslErr = run("PATH=\"$PATH:/usr/bin:/usr/local/bin\" certbot renew --cert-name " + shellQuote(strings.TrimPrefix(rule.Domain, "*.")) + " --force-renewal --no-random-sleep-on-renew --non-interactive 2>&1")
+			} else {
+				output, sslErr = run(fmt.Sprintf(
+					`PATH="$PATH:/usr/bin:/usr/local/bin" certbot --nginx -d %s --non-interactive --agree-tos --redirect -m %s 2>&1`,
+					shellQuote(rule.Domain), shellQuote(body.Email),
+				))
+			}
 		case "caddy":
 			output = "Caddy manages SSL automatically — no action needed."
 		}
@@ -343,9 +437,22 @@ func (h *Handler) EnableSSL(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"error": sslErr.Error(), "output": output})
 		return
 	}
-	h.db.Model(&rule).Update("ssl_enabled", true)
+	if err := h.db.Model(&rule).Update("ssl_enabled", true).Error; err != nil {
+		writeErr(w, "Could not save certificate status.", 500)
+		return
+	}
 	rule.SSLEnabled = true
-	json.NewEncoder(w).Encode(map[string]any{"rule": rule, "output": output})
+	response := map[string]any{"rule": rule, "output": output}
+	if body.Wildcard {
+		response["warning"] = "Automatic DNS certificate renewal is not configured. The token is removed after this request. Use Renew with a fresh token before expiry, or configure renewal separately on the server. Nexus has not independently verified DNS cleanup."
+		response["dnsCleanupStatus"] = "unverified"
+		if dnsCleanupReportedFailure(output) {
+			audit.MarkFailed(r.Context())
+			response["dnsCleanupStatus"] = "reported_failure"
+			response["warning"] = "Certificate installed, but the DNS plugin reported a cleanup failure. Inspect and remove only this operation's challenge records at the provider. Automatic renewal is not configured."
+		}
+	}
+	json.NewEncoder(w).Encode(response)
 }
 
 func nginxConfig(domain, target string) string {
@@ -369,79 +476,158 @@ func nginxConfig(domain, target string) string {
 `, domain, target)
 }
 
+var managedProxyID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+const nginxValidate = `nginx -t 2>&1`
+const nginxReload = `nginx -s reload 2>&1`
+const caddyValidate = `caddy validate --config /etc/caddy/Caddyfile 2>&1`
+const caddyReload = `caddy reload --config /etc/caddy/Caddyfile 2>&1`
+
+func nginxPaths(id string) (string, string, error) {
+	if !managedProxyID.MatchString(id) {
+		return "", "", fmt.Errorf("invalid managed proxy identity")
+	}
+	return "/etc/nginx/sites-available/nexus-" + id + ".conf", "/etc/nginx/sites-enabled/nexus-" + id + ".conf", nil
+}
 func createNginxRule(run func(string) (string, error), id, domain, target string, ssl bool) error {
-	confPath := fmt.Sprintf("/etc/nginx/sites-available/nexus-%s.conf", id)
-	linkPath := fmt.Sprintf("/etc/nginx/sites-enabled/nexus-%s.conf", id)
-	if _, err := run(fmt.Sprintf("cat > %s << 'NEXUS_EOF'\n%s\nNEXUS_EOF", confPath, nginxConfig(domain, target))); err != nil {
-		return fmt.Errorf("write config: %w", err)
+	if !validDomain(domain) || !validTarget(target) {
+		return fmt.Errorf("invalid proxy route")
 	}
-	if _, err := run(fmt.Sprintf("ln -sf %s %s", confPath, linkPath)); err != nil {
-		return fmt.Errorf("enable site: %w", err)
+	conf, link, err := nginxPaths(id)
+	if err != nil {
+		return err
 	}
-	if out, err := run(`PATH="$PATH:/usr/local/sbin:/usr/sbin" nginx -t 2>&1`); err != nil {
-		run(fmt.Sprintf("rm -f %s %s", confPath, linkPath))
-		return fmt.Errorf("config test failed: %s", out)
+	change := "[ ! -L " + shellQuote(conf) + " ] || exit 1\ncat > " + shellQuote(conf) + " << 'NEXUS_EOF' || exit 1\n" + nginxConfig(domain, target) + "\nNEXUS_EOF\nln -sf -- " + shellQuote(conf) + " " + shellQuote(link) + " || exit 1"
+	return proxyTransaction(run, []string{conf, link}, change, nginxValidate, nginxReload)
+}
+func updateNginxTarget(run func(string) (string, error), id, target string) error {
+	if !validTarget(target) {
+		return fmt.Errorf("invalid proxy target")
 	}
-	if _, err := run(`PATH="$PATH:/usr/bin:/bin:/usr/local/bin" systemctl reload nginx 2>/dev/null || service nginx reload 2>/dev/null || true`); err != nil {
-		return fmt.Errorf("reload: %w", err)
+	conf, link, err := nginxPaths(id)
+	if err != nil {
+		return err
 	}
-	return nil
+	return proxyTransaction(run, []string{conf, link}, nginxTargetChange(conf, target), nginxValidate, nginxReload)
+}
+func nginxTargetChange(conf, target string) string {
+	pattern := `s@^([[:space:]]*)proxy_pass http://[^;]*;@\1proxy_pass http://` + target + `;@`
+	return "[ ! -L " + shellQuote(conf) + " ] || exit 1\n[ \"$(grep -c '^[[:space:]]*proxy_pass http://' " + shellQuote(conf) + ")\" = 1 ] || exit 1\nsed -i -E " + shellQuote(pattern) + " " + shellQuote(conf) + " || exit 1"
 }
 
-func deleteNginxRule(run func(string) (string, error), id, _ string) {
-	confPath := fmt.Sprintf("/etc/nginx/sites-available/nexus-%s.conf", id)
-	linkPath := fmt.Sprintf("/etc/nginx/sites-enabled/nexus-%s.conf", id)
-	run(fmt.Sprintf("rm -f %s %s", confPath, linkPath))
-	run(`PATH="$PATH:/usr/bin:/bin:/usr/local/bin" systemctl reload nginx 2>/dev/null || service nginx reload 2>/dev/null || true`)
+func deleteNginxRule(run func(string) (string, error), id, _ string) error {
+	conf, link, err := nginxPaths(id)
+	if err != nil {
+		return err
+	}
+	return proxyTransaction(run, []string{conf, link}, "rm -f -- "+shellQuote(conf)+" "+shellQuote(link)+" || exit 1", nginxValidate, nginxReload)
 }
-
+func caddyBlock(domain, target string) string {
+	return fmt.Sprintf("\n%s {\n    reverse_proxy %s\n}\n", domain, target)
+}
+func caddyEdit(run func(string) (string, error), change string) error {
+	const file = "/etc/caddy/Caddyfile"
+	return proxyTransaction(run, []string{file}, "[ ! -L "+shellQuote(file)+" ] || exit 1\n"+change, caddyValidate, caddyReload)
+}
 func createCaddyRule(run func(string) (string, error), domain, target string) error {
-	cmd := fmt.Sprintf("cat >> /etc/caddy/Caddyfile << 'NEXUS_EOF'\n%s {\n    reverse_proxy %s\n}\nNEXUS_EOF", domain, target)
-	if _, err := run(cmd); err != nil {
-		return fmt.Errorf("write caddyfile: %w", err)
+	if !validDomain(domain) || !validTarget(target) {
+		return fmt.Errorf("invalid proxy route")
 	}
-	if _, err := run(`PATH="$PATH:/usr/bin:/usr/local/bin" systemctl reload caddy 2>/dev/null || caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || true`); err != nil {
-		return fmt.Errorf("reload caddy: %w", err)
+	return caddyEdit(run, "cat >> /etc/caddy/Caddyfile << 'NEXUS_EOF' || exit 1\n"+caddyBlock(domain, target)+"NEXUS_EOF")
+}
+func deleteCaddyCommand(domain string) (string, error) {
+	if !validDomain(domain) {
+		return "", fmt.Errorf("invalid stored domain")
 	}
-	return nil
+	pattern := "/^" + regexp.QuoteMeta(domain) + " {/,/^}/d"
+	return "sed -i " + shellQuote(pattern) + " /etc/caddy/Caddyfile || exit 1", nil
+}
+func deleteCaddyRule(run func(string) (string, error), domain string) error {
+	change, err := deleteCaddyCommand(domain)
+	if err != nil {
+		return err
+	}
+	return caddyEdit(run, change)
+}
+func updateCaddyRule(run func(string) (string, error), oldDomain, domain, target string) error {
+	if !validDomain(domain) || !validTarget(target) {
+		return fmt.Errorf("invalid proxy route")
+	}
+	change, err := deleteCaddyCommand(oldDomain)
+	if err != nil {
+		return err
+	}
+	return caddyEdit(run, change+"\ncat >> /etc/caddy/Caddyfile << 'NEXUS_EOF' || exit 1\n"+caddyBlock(domain, target)+"NEXUS_EOF")
 }
 
-func deleteCaddyRule(run func(string) (string, error), domain string) {
-	safe := strings.ReplaceAll(domain, ".", "\\.")
-	run(fmt.Sprintf(
-		`sed -i '/^%s {/,/^}/d' /etc/caddy/Caddyfile && systemctl reload caddy 2>/dev/null || true`,
-		safe,
-	))
+func enableWildcardSSL(run func(string) (string, error), send func(string, string) (string, error), rule models.ProxyRule, email, cfToken string, cleanup ...func(string) (string, error)) (output string, resultErr error) {
+	return enableWildcardSSLWithRenewal(run, send, rule, email, cfToken, false, cleanup...)
 }
 
-func enableWildcardSSL(run func(string) (string, error), rule models.ProxyRule, email, cfToken string) (string, error) {
+func enableWildcardSSLWithRenewal(run func(string) (string, error), send func(string, string) (string, error), rule models.ProxyRule, email, cfToken string, renew bool, cleanup ...func(string) (string, error)) (output string, resultErr error) {
+	if cfToken == "" || len(cfToken) > 4096 || strings.ContainsAny(cfToken, "\r\n\x00") {
+		return "", fmt.Errorf("invalid DNS API token")
+	}
+	domain := strings.TrimPrefix(rule.Domain, "*.")
+	if !domainRe.MatchString(domain) || len(domain) > 253 || !emailRe.MatchString(email) {
+		return "", fmt.Errorf("invalid certificate domain or email")
+	}
+	defer func() {
+		output = strings.ReplaceAll(output, cfToken, "[redacted]")
+		if resultErr != nil && strings.Contains(resultErr.Error(), cfToken) {
+			resultErr = errors.New(strings.ReplaceAll(resultErr.Error(), cfToken, "[redacted]"))
+		}
+	}()
 	var out strings.Builder
-	installOut, _ := run(`PATH="$PATH:/usr/bin:/usr/local/bin" apt-get install -y python3-certbot-dns-cloudflare 2>&1 || pip3 install certbot-dns-cloudflare 2>&1`)
+	installOut, installErr := run(`PATH="$PATH:/usr/bin:/usr/local/bin" apt-get install -y python3-certbot-dns-cloudflare 2>&1 || pip3 install certbot-dns-cloudflare 2>&1`)
 	out.WriteString(installOut + "\n")
+	if installErr != nil {
+		return out.String(), fmt.Errorf("could not prepare DNS certificate plugin")
+	}
 
-	credPath := fmt.Sprintf("/tmp/nexus-cf-%s.ini", rule.ID)
-	run(fmt.Sprintf("printf 'dns_cloudflare_api_token = %%s\\n' %s > %s && chmod 600 %s", shellQuote(cfToken), credPath, credPath))
+	credPath, err := run("umask 077; mktemp /tmp/nexus-cf.XXXXXXXXXX")
+	if err != nil || !regexp.MustCompile(`^/tmp/nexus-cf\.[A-Za-z0-9]{10}$`).MatchString(credPath) {
+		return out.String(), fmt.Errorf("could not create private certificate credentials")
+	}
+	defer func() {
+		remove := run
+		if len(cleanup) > 0 {
+			remove = cleanup[0]
+		}
+		if _, err := remove("rm -f -- " + shellQuote(credPath)); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("certificate credential cleanup failed"))
+		}
+	}()
+	if _, err := send("cat > "+shellQuote(credPath)+" && chmod 600 -- "+shellQuote(credPath), "dns_cloudflare_api_token = "+cfToken+"\n"); err != nil {
+		return out.String(), fmt.Errorf("could not write private certificate credentials")
+	}
 
-	certOut, certErr := run(fmt.Sprintf(
+	command := fmt.Sprintf(
 		`PATH="$PATH:/usr/bin:/usr/local/bin" certbot certonly --dns-cloudflare --dns-cloudflare-credentials %s `+
-			`-d %s -d %s --non-interactive --agree-tos -m %s 2>&1`,
-		credPath, shellQuote("*."+rule.Domain), shellQuote(rule.Domain), shellQuote(email),
-	))
+			`--cert-name %s -d %s -d %s --non-interactive --agree-tos -m %s 2>&1`,
+		shellQuote(credPath), shellQuote(domain), shellQuote("*."+domain), shellQuote(domain), shellQuote(email))
+	if renew {
+		command = "PATH=\"$PATH:/usr/bin:/usr/local/bin\" certbot renew --cert-name " + shellQuote(domain) + " --force-renewal --no-random-sleep-on-renew --dns-cloudflare --dns-cloudflare-credentials " + shellQuote(credPath) + " --non-interactive 2>&1"
+	}
+	certOut, certErr := run(command)
 	out.WriteString(certOut + "\n")
-	run(fmt.Sprintf("rm -f %s", credPath))
 
 	if certErr != nil {
 		return out.String(), certErr
 	}
 	if rule.ProxyType == "nginx" {
-		nginxOut, _ := run(fmt.Sprintf(
-			`PATH="$PATH:/usr/local/sbin:/usr/sbin" certbot install --nginx -d %s --non-interactive 2>&1 || `+
-				`certbot install --nginx -d %s --non-interactive 2>&1 || true`,
-			shellQuote("*."+rule.Domain), shellQuote(rule.Domain),
-		))
+		nginxOut, installErr := run("PATH=\"$PATH:/usr/local/sbin:/usr/sbin:/usr/bin:/usr/local/bin\" certbot install --nginx --cert-name " + shellQuote(domain) + " -d " + shellQuote(rule.Domain) + " --non-interactive 2>&1")
 		out.WriteString(nginxOut + "\n")
+		if installErr != nil {
+			return out.String(), installErr
+		}
 	}
 	return out.String(), nil
+}
+
+func dnsCleanupReportedFailure(output string) bool {
+	output = strings.ToLower(output)
+	return strings.Contains(output, "error deleting txt record") || strings.Contains(output, "error during cleanup") || strings.Contains(output, "cleanup failed")
 }
 
 func newID() string {

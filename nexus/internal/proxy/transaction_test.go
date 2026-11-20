@@ -103,3 +103,33 @@ func TestProxyRollbackFailureRetainsPrivateRecoverySet(t *testing.T) {
 		t.Fatal("recovery set lost original", err)
 	}
 }
+func TestProxyTargetValidationBoundsPortsAndSupportsIPv6(t *testing.T) {
+	for _, target := range []string{"127.0.0.1:0", "127.0.0.1:65536", "backend:+80", "bad host:80", "-bad:80", "a..b:80"} {
+		if validTarget(target) {
+			t.Fatal("invalid target accepted", target)
+		}
+	}
+	for _, target := range []string{"127.0.0.1:8080", "backend:80", "backend.internal:65535", "[::1]:8080"} {
+		if !validTarget(target) {
+			t.Fatal("valid target rejected", target)
+		}
+	}
+}
+
+func TestNginxUpstreamEditPreservesCertificateDirectives(t *testing.T) {
+	directory := t.TempDir()
+	config := filepath.Join(directory, "tls.conf")
+	original := "server {\n listen 443 ssl;\n ssl_certificate /private/fixture.crt;\n ssl_certificate_key /private/fixture.key;\n location / {\n  proxy_pass http://127.0.0.1:80;\n }\n}\n"
+	if err := os.WriteFile(config, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", nginxTargetChange(config, "[::1]:8080"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("upstream edit failed: %v %s", err, out)
+	}
+	actual, err := os.ReadFile(config)
+	expected := strings.Replace(original, "127.0.0.1:80", "[::1]:8080", 1)
+	if err != nil || string(actual) != expected {
+		t.Fatal("certificate/directive data changed during upstream edit", err)
+	}
+}
