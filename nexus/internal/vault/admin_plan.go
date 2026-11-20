@@ -167,6 +167,9 @@ func buildAdminPlan(op AdminOperation, v map[string]any) (adminPlan, error) {
 	case "audit-disable":
 		plan.method, plan.path = "DELETE", "/v1/sys/audit/"+name
 	default:
+		if strings.HasPrefix(op.ID, "identity-") || strings.HasPrefix(op.ID, "transit-") {
+			return buildIdentityTransitPlan(op, v)
+		}
 		return buildPKIPlan(op, v)
 	}
 	return plan, nil
