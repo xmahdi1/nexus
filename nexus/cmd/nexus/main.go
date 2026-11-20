@@ -31,6 +31,12 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "audit-prune" {
+		if err := runAuditPrune(os.Args[2:], os.Stdout); err != nil {
+			log.Fatalf("audit retention failed: %v", err)
+		}
+		return
+	}
 
 	if len(os.Args) > 1 && os.Args[1] == "account-recovery" {
 		if err := runAccountRecovery(os.Args[2:], os.Stdout); err != nil {
