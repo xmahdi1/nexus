@@ -33,3 +33,16 @@ docs/
 # Python lab runner bytecode
 __pycache__/
 *.py[cod]
+
+# Private workspace configuration and instruction files
+.aws/
+.codex/
+.claude/
+.agents/
+.cursor/
+.aider*
+**/AGENTS.md
+**/CLAUDE.md
+**/SKILL.md
+.github/copilot-instructions.md
+/NEXUS_2_0_SPECIFICATION.md
