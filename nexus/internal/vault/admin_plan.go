@@ -5,14 +5,6 @@ import (
 	"strings"
 )
 
-type adminPlan struct {
-	method, path string
-	body         map[string]any
-	keys         string
-	auth         bool
-	resourceMap  bool
-}
-
 // Only this switch constructs upstream paths. Values used in path segments have
 // already passed the catalog's ASCII segment/path validation.
 func buildAdminPlan(op AdminOperation, v map[string]any) (adminPlan, error) {
