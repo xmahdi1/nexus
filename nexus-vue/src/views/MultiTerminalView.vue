@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import {verifySession, can as socketCan} from '@/lib/auth'
 import {ref, nextTick, onUnmounted, computed} from 'vue'
 import {Plus, X, RefreshCw, Server, Copy} from '@lucide/vue'
 import {Terminal} from '@xterm/xterm'
@@ -17,6 +18,9 @@ interface Session {
   serverName: string
   term: Terminal | null
   fitAddon: FitAddon | null
+  inputSubscription?:{dispose():void}
+  resizeSubscription?:{dispose():void}
+  connectEpoch?:number
   ws: WebSocket | null
   dead: boolean
   themeObs: MutationObserver | null
@@ -161,7 +165,17 @@ function initSession(session: Session) {
   session.themeObs = themeObs
 }
 
-function openWS(session: Session, term: Terminal, fitAddon: FitAddon) {
+function dropSocket(session:Session){
+ session.connectEpoch=(session.connectEpoch??0)+1
+ session.inputSubscription?.dispose();session.resizeSubscription?.dispose()
+ const socket=session.ws
+ if(socket){socket.onopen=null;socket.onclose=null;socket.onerror=null;socket.onmessage=null;socket.close()}
+ session.ws=null
+}
+
+async function openWS(session: Session, term: Terminal, fitAddon: FitAddon) {
+  const epoch=session.connectEpoch=(session.connectEpoch??0)+1
+  if (!await verifySession() || !socketCan('servers.terminal',session.serverId) || !socketCan('servers.execute',session.serverId) || !sessions.value.includes(session) || session.term !== term || session.connectEpoch!==epoch) {session.dead=true; return}
   const ws = new WebSocket(api.ws.terminal(session.serverId))
   session.ws = ws
   ws.binaryType = 'arraybuffer'
@@ -173,6 +187,8 @@ function openWS(session: Session, term: Terminal, fitAddon: FitAddon) {
   }
   ws.onmessage = (e) => term.write(e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data)
   ws.onclose = () => {
+    if(ws!==session.ws)return
+    session.dead=true
     if (!started) {
       term.write('\r\n\x1b[31m[connection failed]\x1b[0m\r\n');
       return
@@ -181,10 +197,13 @@ function openWS(session: Session, term: Terminal, fitAddon: FitAddon) {
     session.dead = true
   }
   ws.onerror = () => {
+    if(ws!==session.ws)return
     if (!started) term.write('\r\n\x1b[31m[connection error]\x1b[0m\r\n')
   }
-  term.onData(d => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({type: 'input', data: d})))
-  term.onResize(({cols, rows}) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({
+  session.inputSubscription?.dispose()
+  session.inputSubscription=term.onData(d => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({type: 'input', data: d})))
+  session.resizeSubscription?.dispose()
+  session.resizeSubscription=term.onResize(({cols, rows}) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({
     type: 'resize',
     cols,
     rows
@@ -195,7 +214,7 @@ function closeSession(id: string) {
   const s = sessions.value.find(s => s.id === id)
   if (s) {
     s.themeObs?.disconnect();
-    s.ws?.close();
+    dropSocket(s);
     s.term?.dispose()
   }
   sessions.value = sessions.value.filter(s => s.id !== id)
@@ -206,7 +225,7 @@ function closeSession(id: string) {
 function reconnect(session: Session) {
   session.dead = false
   session.term?.clear()
-  session.ws?.close()
+  dropSocket(session)
   openWS(session, session.term!, session.fitAddon!)
 }
 
@@ -220,9 +239,10 @@ async function switchTo(id: string) {
 onUnmounted(() => {
   for (const s of sessions.value) {
     s.themeObs?.disconnect();
-    s.ws?.close();
+    dropSocket(s);
     s.term?.dispose()
   }
+  sessions.value=[]
 })
 
 store.fetchAll().catch(() => {
