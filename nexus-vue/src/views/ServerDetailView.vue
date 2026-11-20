@@ -1,5 +1,8 @@
 <script setup lang="ts">
+import {verifySession, can as socketCan} from '@/lib/auth'
 import {can} from '@/lib/auth'
+import VaultTab from '@/components/VaultTab.vue'
+import InventoryTab from '@/components/InventoryTab.vue'
 import {nextTick, onMounted, onUnmounted, ref, watch} from 'vue'
 import {useRoute, useRouter} from 'vue-router'
 import {useI18n} from 'vue-i18n'
@@ -41,6 +44,9 @@ interface TermSession {
   id: string
   term: Terminal | null;
   fitAddon: FitAddon | null;
+  inputSubscription?:{dispose():void}
+  resizeSubscription?:{dispose():void}
+  connectEpoch?:number
   ws: WebSocket | null
   dead: boolean;
   themeObs: MutationObserver | null;
@@ -48,6 +54,8 @@ interface TermSession {
 }
 
 const tabs = [
+  {key:'vault',label:'Vault',icon:ShieldCheck},
+  {key:'inventory',label:'Inventory',icon:BarChart3},
   {key: 'terminal', label: t('server.tabs.terminal'), icon: TerminalIcon},
   {key: 'containers', label: t('server.tabs.containers'), icon: ContainerIcon},
   {key: 'compose', label: t('server.tabs.compose'), icon: FileCode},
@@ -60,9 +68,11 @@ const tabs = [
   {key: 'firewall', label: 'Firewall', icon: ShieldCheck},
 ] as const
 
-const tabPermissions: Record<string,string[]> = {terminal:['servers.terminal','servers.execute'],containers:['docker.read'],compose:['compose.read'],metrics:['metrics.read'],files:['files.list'],proxy:['proxy.read','proxy.manage'],apps:['deployments.read','templates.read'],cron:['jobs.read','logs.read'],tasks:['jobs.read','logs.read'],firewall:['firewall.read','firewall.manage']}
+const tabPermissions: Record<string,string[]> = {vault:['integrations.manage','servers.read'],inventory:['inventory.read'],terminal:['servers.terminal','servers.execute'],containers:['docker.read'],compose:['compose.read'],metrics:['metrics.read'],files:['files.list'],proxy:['proxy.read','proxy.manage'],apps:['deployments.read','templates.read'],cron:['jobs.read','logs.read'],tasks:['jobs.read','logs.read'],firewall:['firewall.read','network.read']}
+const inventoryEnabled=ref(false)
+const vaultEnabled=ref(false)
 const visibleTabs = tabs.filter(tab => tabPermissions[tab.key]!.every(permission => can(permission,serverId)))
-const activeTab = ref<'terminal' | 'containers' | 'compose' | 'metrics' | 'files' | 'proxy' | 'apps' | 'cron' | 'tasks' | 'firewall'>(visibleTabs[0]?.key ?? 'containers')
+const activeTab = ref<'vault' | 'inventory' | 'terminal' | 'containers' | 'compose' | 'metrics' | 'files' | 'proxy' | 'apps' | 'cron' | 'tasks' | 'firewall'>(visibleTabs.find(tab=>tab.key!=='inventory' && tab.key!=='vault')?.key ?? 'containers')
 const server = ref(store.list.find(s => s.id === serverId))
 const tagSaving = ref(false)
 const monitoredContainerIds = ref<Set<string>>(new Set())
@@ -208,7 +218,17 @@ function mountSession(id: string) {
   session.ro = ro
 }
 
-function openSessionWS(session: TermSession, term: Terminal, fitAddon: FitAddon) {
+function dropSocket(session:TermSession){
+ session.connectEpoch=(session.connectEpoch??0)+1
+ session.inputSubscription?.dispose();session.resizeSubscription?.dispose()
+ const socket=session.ws
+ if(socket){socket.onopen=null;socket.onclose=null;socket.onerror=null;socket.onmessage=null;socket.close()}
+ session.ws=null
+}
+
+async function openSessionWS(session: TermSession, term: Terminal, fitAddon: FitAddon) {
+  const epoch=session.connectEpoch=(session.connectEpoch??0)+1
+  if (!await verifySession() || !socketCan('servers.terminal',serverId) || !socketCan('servers.execute',serverId) || !termSessions.value.includes(session) || session.term !== term || session.connectEpoch!==epoch) {session.dead=true; return}
   const socket = new WebSocket(api.ws.terminal(serverId))
   session.ws = socket
   socket.binaryType = 'arraybuffer'
@@ -220,6 +240,7 @@ function openSessionWS(session: TermSession, term: Terminal, fitAddon: FitAddon)
   socket.onmessage = (e) => term.write(e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data)
   socket.onclose = () => {
     if (socket !== session.ws) return
+    session.dead=true
     if (!started) {
       term.write('\r\n\x1b[31m[connection failed]\x1b[0m\r\n');
       return
@@ -231,8 +252,10 @@ function openSessionWS(session: TermSession, term: Terminal, fitAddon: FitAddon)
     if (socket !== session.ws || started) return;
     term.write('\r\n\x1b[31m[connection error]\x1b[0m\r\n')
   }
-  term.onData(d => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify({type: 'input', data: d})))
-  term.onResize(({cols, rows}) => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify({
+  session.inputSubscription?.dispose()
+  session.inputSubscription=term.onData(d => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify({type: 'input', data: d})))
+  session.resizeSubscription?.dispose()
+  session.resizeSubscription=term.onResize(({cols, rows}) => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify({
     type: 'resize',
     cols,
     rows
@@ -251,7 +274,7 @@ function closeTermSession(id: string) {
   if (s) {
     s.themeObs?.disconnect();
     s.ro?.disconnect();
-    s.ws?.close();
+    dropSocket(s);
     s.term?.dispose()
   }
   termSessions.value = termSessions.value.filter(s => s.id !== id)
@@ -264,7 +287,7 @@ function closeTermSession(id: string) {
 function reconnectSession(session: TermSession) {
   session.dead = false;
   session.term?.clear();
-  session.ws?.close()
+  dropSocket(session)
   openSessionWS(session, session.term!, session.fitAddon!)
 }
 
@@ -272,7 +295,7 @@ function destroyAllSessions() {
   for (const s of termSessions.value) {
     s.themeObs?.disconnect();
     s.ro?.disconnect();
-    s.ws?.close();
+    dropSocket(s);
     s.term?.dispose()
   }
   termSessions.value = []
@@ -346,11 +369,11 @@ async function fetchContainers() {
 }
 
 async function containerAction(cid: string, action: 'start' | 'stop' | 'restart' | 'remove', label: string) {
-  if (action === 'remove') {
+  if (['stop','restart','remove'].includes(action)) {
     const ok = await confirm({
-      title: 'Remove container',
-      message: `Remove "${containers.value.find(c => c.id === cid)?.name || cid}"? This cannot be undone.`,
-      confirmText: 'Remove', destructive: true,
+      title: `${label} container`,
+      message: `${label} "${containers.value.find(c => c.id === cid)?.name || cid}" on ${server.value?.name || serverId}? ${action === 'remove' ? 'Writable container data is deleted; named volumes are retained.' : 'This can interrupt services.'} Inspect uncertain prior operations before retrying.`,
+      confirmText: label, destructive: true,
     })
     if (!ok) return
   }
@@ -399,6 +422,8 @@ async function loadCompose() {
 }
 
 async function saveCompose() {
+  if (!can('compose.write',serverId)) return
+  if(!await confirm({title:'Replace Compose recipe?',message:`Replace ${composePath.value} on ${server.value?.name || serverId}? Save a recovery copy before changing a live deployment.`,confirmText:'Save recipe',destructive:true}))return
   composeSaving.value = true
   try {
     await api.compose.write(serverId, composePath.value, composeContent.value);
@@ -411,6 +436,8 @@ async function saveCompose() {
 }
 
 async function composeUp() {
+  if(!can('deployments.execute',serverId))return
+  if(!await confirm({title:'Apply Compose deployment?',message:`Apply the saved recipe ${composePath.value} on ${server.value?.name || serverId}? Services may be recreated. Unsaved edits are not deployed. Inspect an uncertain prior result before retrying.`,confirmText:'Apply',destructive:true}))return
   composeActing.value = 'up'
   try {
     const res = await api.compose.up(serverId, composePath.value);
@@ -427,6 +454,8 @@ async function composeUp() {
 }
 
 async function composeDown() {
+  if(!can('deployments.execute',serverId))return
+  if(!await confirm({title:'Stop Compose deployment?',message:`Stop and remove containers for ${composePath.value} on ${server.value?.name || serverId}? Named volumes and recipe files are retained.`,confirmText:'Stop deployment',destructive:true}))return
   composeActing.value = 'down'
   try {
     const res = await api.compose.down(serverId, composePath.value);
@@ -443,6 +472,7 @@ async function composeDown() {
 }
 
 onMounted(async () => {
+  try{const features=await api.features();inventoryEnabled.value=features.inventory;vaultEnabled.value=features.vault}catch{}
   if (!server.value) {
     try {
       const s = await api.servers.get(serverId)
@@ -517,7 +547,7 @@ watch(activeTab, tab => {
           </button>
         </div>
 
-        <button v-for="tab in visibleTabs.filter(t => t.key !== 'terminal')" :key="tab.key"
+        <button v-for="tab in visibleTabs.filter(t => t.key !== 'terminal' && (t.key !== 'inventory' || inventoryEnabled) && (t.key !== 'vault' || vaultEnabled))" :key="tab.key"
                 :class="['flex items-center gap-1.5 px-3 sm:px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors shrink-0',
             activeTab === tab.key ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground']"
                 @click="activeTab = tab.key">
@@ -575,6 +605,8 @@ watch(activeTab, tab => {
         </div>
       </div>
 
+      <VaultTab v-if="vaultEnabled && activeTab==='vault'" :server-id="serverId"/>
+      <InventoryTab v-if="inventoryEnabled && activeTab==='inventory'" :server-id="serverId"/>
       <div v-if="activeTab === 'containers'" class="space-y-4">
         <div class="flex items-center justify-between">
           <h2 class="text-sm font-medium">Containers</h2>
@@ -710,21 +742,21 @@ watch(activeTab, tab => {
           <div class="flex items-center justify-between px-3 py-2 border-b bg-muted/30 flex-wrap gap-2">
             <span class="text-xs text-muted-foreground font-mono truncate">{{ composePath }}</span>
             <div class="flex items-center gap-2 shrink-0">
-              <Button size="sm" variant="outline"
+              <Button v-if="can('deployments.execute',serverId)" size="sm" variant="outline"
                       class="gap-1.5 h-7 text-xs text-green-600 border-green-600/30 hover:bg-green-600/10"
                       :disabled="!composeContent || composeActing !== null" @click="composeUp">
                 <Loader2 v-if="composeActing === 'up'" class="h-3 w-3 animate-spin"/>
                 <ChevronUp v-else class="h-3 w-3"/>
                 up -d
               </Button>
-              <Button size="sm" variant="outline"
+              <Button v-if="can('deployments.execute',serverId)" size="sm" variant="outline"
                       class="gap-1.5 h-7 text-xs text-yellow-600 border-yellow-600/30 hover:bg-yellow-600/10"
                       :disabled="!composeContent || composeActing !== null" @click="composeDown">
                 <Loader2 v-if="composeActing === 'down'" class="h-3 w-3 animate-spin"/>
                 <ChevronDown v-else class="h-3 w-3"/>
                 down
               </Button>
-              <Button size="sm" class="gap-1.5 h-7 text-xs" :disabled="!composeContent || composeSaving"
+              <Button v-if="can('compose.write',serverId)" size="sm" class="gap-1.5 h-7 text-xs" :disabled="!composeContent || composeSaving"
                       @click="saveCompose">
                 <Loader2 v-if="composeSaving" class="h-3 w-3 animate-spin"/>
                 <Upload v-else class="h-3 w-3"/>
@@ -732,7 +764,7 @@ watch(activeTab, tab => {
               </Button>
             </div>
           </div>
-          <textarea v-model="composeContent"
+          <textarea v-model="composeContent" :readonly="!can('compose.write',serverId)"
                     class="compose-editor w-full font-mono text-sm bg-card text-foreground px-4 py-3 resize-none focus:outline-none"
                     placeholder="Load a docker-compose.yml file to edit it…" spellcheck="false"/>
         </div>
