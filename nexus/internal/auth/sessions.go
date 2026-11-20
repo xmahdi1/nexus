@@ -344,6 +344,19 @@ func (s *Service) Authenticate(token string) (*Access, error) {
 	return access, err
 }
 
+// AccessForSession validates a previously bound worker's persisted authority. It
+// never authenticates an HTTP request, issues credentials or refreshes idle TTL.
+func (s *Service) AccessForSession(id, actor string) (*Access, error) {
+	if id == "" || len(id) > 128 || actor == "" {
+		return nil, ErrUnauthorized
+	}
+	var session Session
+	if err := s.DB.First(&session, "id=? AND principal_id=?", id, actor).Error; err != nil {
+		return nil, ErrUnauthorized
+	}
+	return s.validate(s.DB, session)
+}
+
 // AuthorizedNow rechecks the stored session and current authorization without
 // refreshing idle expiry. Sensitive HTTP responses must not rely only on the
 // periodic stream watcher when a session was revoked just before completion.

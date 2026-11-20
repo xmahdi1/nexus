@@ -66,6 +66,27 @@ func TestAuthorizedNowRejectsRevocationWithoutWaitingForWatcher(t *testing.T) {
 		t.Fatal("revoked session accepted before watcher tick")
 	}
 }
+
+func TestWorkerSessionLookupNeverRefreshesIdleAuthority(t *testing.T) {
+	s, _ := sessionFixture(t)
+	access := mustAccess(t, s, mustLogin(t, s, "", "current legacy password"))
+	before := access.Session.LastUsedAt
+	if _, err := s.AccessForSession(access.Session.ID, "another-principal"); err == nil {
+		t.Fatal("session rebound to another principal")
+	}
+	if _, err := s.AccessForSession(access.Session.ID, access.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	var stored Session
+	s.DB.First(&stored, "id=?", access.Session.ID)
+	if !stored.LastUsedAt.Equal(before) {
+		t.Fatal("worker extended idle authority")
+	}
+	s.now = func() time.Time { return before.Add(s.IdleTTL + time.Second) }
+	if _, err := s.AccessForSession(access.Session.ID, access.User.ID); err == nil {
+		t.Fatal("expired worker session remained authorized")
+	}
+}
 func mustAccess(t *testing.T, s *Service, token string) *Access {
 	t.Helper()
 	a, err := s.Authenticate(token)
