@@ -4,7 +4,10 @@ import {toast} from 'vue-sonner'
 import {Loader2, Plus, RefreshCw, Shield, ShieldOff, Trash2, X} from '@lucide/vue'
 import type {FirewallStatus} from '@/lib/api'
 import {api} from '@/lib/api'
+import {can} from '@/lib/auth'
 import Button from '@/components/ui/Button.vue'
+import { useConfirm } from '@/composables/useConfirm'
+const {confirm} = useConfirm()
 
 const CACHE_TTL = 45_000
 
@@ -77,7 +80,9 @@ async function load(force = false) {
 }
 
 async function toggle() {
-  if (!status.value) return
+  if (!status.value || !can('firewall.manage', props.serverId)) return
+  const action = status.value.status === 'active' ? 'Disable' : 'Enable'
+  if (!await confirm({title: `${action} firewall?`, message: 'This changes network access immediately and may disconnect SSH or Nexus. Verify a recovery connection before continuing.', confirmText: action, destructive: true})) return
   toggling.value = true
   try {
     if (status.value.status === 'active') {
@@ -96,7 +101,8 @@ async function toggle() {
 }
 
 async function addRule() {
-  if (!formPort.value.trim()) return
+  if (!formPort.value.trim() || !can('firewall.manage', props.serverId)) return
+  if (formAction.value === 'deny' && !await confirm({title: 'Deny network access?', message: `Deny ${formPort.value}/${formProto.value} from ${formFrom.value || 'Anywhere'}? This may disconnect a management connection.`, confirmText: 'Add deny rule', destructive: true})) return
   adding.value = true
   try {
     const port = formProto.value === 'any' ? formPort.value : `${formPort.value}/${formProto.value}`
@@ -116,6 +122,8 @@ async function addRule() {
 }
 
 async function deleteRule(n: number) {
+  if (!can('firewall.manage', props.serverId)) return
+  if (!await confirm({title: 'Delete firewall rule?', message: `Remove rule ${n}? This immediately changes access and may disconnect a management connection.`, confirmText: 'Delete', destructive: true})) return
   deleting.value = n
   try {
     await api.firewall.deleteRule(props.serverId, n)
@@ -197,7 +205,7 @@ onMounted(() => load())
             <span class="font-medium">UFW Firewall</span>
             <span class="text-sm text-muted-foreground capitalize">{{ status.status }}</span>
           </div>
-          <Button variant="outline" size="sm" class="gap-2" :disabled="toggling" @click="toggle">
+          <Button v-if="can('firewall.manage', serverId)" variant="outline" size="sm" class="gap-2" :disabled="toggling" @click="toggle">
             <Loader2 v-if="toggling" class="h-3.5 w-3.5 animate-spin"/>
             <ShieldOff v-else-if="status.status === 'active'" class="h-3.5 w-3.5"/>
             <Shield v-else class="h-3.5 w-3.5"/>
@@ -212,7 +220,7 @@ onMounted(() => load())
               <Button variant="ghost" size="sm" class="h-8 w-8 p-0" @click="load(true)">
                 <RefreshCw class="h-3.5 w-3.5"/>
               </Button>
-              <Button size="sm" class="gap-1.5 h-8" @click="showForm = !showForm">
+              <Button v-if="can('firewall.manage', serverId)" size="sm" class="gap-1.5 h-8" @click="showForm = !showForm">
                 <X v-if="showForm" class="h-3.5 w-3.5"/>
                 <Plus v-else class="h-3.5 w-3.5"/>
                 {{ showForm ? 'Cancel' : 'Add Rule' }}
@@ -220,7 +228,7 @@ onMounted(() => load())
             </div>
           </div>
 
-          <div v-if="showForm" class="mb-3 rounded-xl border border-border p-4">
+          <div v-if="showForm && can('firewall.manage', serverId)" class="mb-3 rounded-xl border border-border p-4">
             <div class="flex flex-wrap gap-3 items-end">
               <div class="flex flex-col gap-1.5">
                 <label class="text-xs text-muted-foreground">Port</label>
@@ -293,7 +301,7 @@ onMounted(() => load())
                 </td>
                 <td class="px-4 py-3 text-sm text-muted-foreground hidden md:table-cell">{{ rule.from }}</td>
                 <td class="px-4 py-3">
-                  <Button variant="ghost" size="sm" class="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
+                  <Button v-if="can('firewall.manage', serverId)" :aria-label="`Delete firewall rule ${rule.number}`" variant="ghost" size="sm" class="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
                           :disabled="deleting === rule.number" @click="deleteRule(rule.number)">
                     <Loader2 v-if="deleting === rule.number" class="h-3.5 w-3.5 animate-spin"/>
                     <Trash2 v-else class="h-3.5 w-3.5"/>
