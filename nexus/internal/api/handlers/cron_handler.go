@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -64,7 +65,7 @@ func parseCrontab(raw string) []CronJob {
 }
 
 func (h *CronHandler) List(w http.ResponseWriter, r *http.Request) {
-	run, err := h.sshRun(chi.URLParam(r, "id"))
+	run, err := h.sshRun(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeErr(w, err.Error(), "ssh_error", http.StatusBadGateway)
 		return
@@ -82,7 +83,7 @@ func (h *CronHandler) Add(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "schedule and command required", "bad_request", http.StatusBadRequest)
 		return
 	}
-	run, err := h.sshRun(chi.URLParam(r, "id"))
+	run, err := h.sshRun(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeErr(w, err.Error(), "ssh_error", http.StatusBadGateway)
 		return
@@ -103,7 +104,7 @@ func (h *CronHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "raw line required", "bad_request", http.StatusBadRequest)
 		return
 	}
-	run, err := h.sshRun(chi.URLParam(r, "id"))
+	run, err := h.sshRun(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeErr(w, err.Error(), "ssh_error", http.StatusBadGateway)
 		return
@@ -119,7 +120,7 @@ func cronQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
-func (h *CronHandler) sshRun(serverID string) (func(string) (string, error), error) {
+func (h *CronHandler) sshRun(ctx context.Context, serverID string) (func(string) (string, error), error) {
 	var server models.Server
 	if err := h.db.First(&server, "id = ?", serverID).Error; err != nil {
 		return nil, fmt.Errorf("server not found")
@@ -128,7 +129,7 @@ func (h *CronHandler) sshRun(serverID string) (func(string) (string, error), err
 	if err != nil {
 		return nil, fmt.Errorf("key decrypt failed")
 	}
-	client, err := h.pool.Get(nexusssh.ServerConfig{
+	client, err := h.pool.GetContext(ctx, nexusssh.ServerConfig{
 		ID: server.ID, Host: server.Host, Port: server.Port,
 		User: server.Username, PrivKey: privKey,
 	})
@@ -136,13 +137,7 @@ func (h *CronHandler) sshRun(serverID string) (func(string) (string, error), err
 		return nil, fmt.Errorf("ssh: %w", err)
 	}
 	return func(cmd string) (string, error) {
-		sess, err := client.NewSession()
-		if err != nil {
-			h.pool.Remove(serverID)
-			return "", err
-		}
-		defer sess.Close()
-		out, err := sess.CombinedOutput(cmd)
-		return strings.TrimSpace(string(out)), err
+		out, err := nexusssh.Run(ctx, client, cmd, nil, nexusssh.CommandTimeout)
+		return strings.TrimSpace(out), err
 	}, nil
 }
