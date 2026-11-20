@@ -181,11 +181,9 @@ async function closeModal() {
   modal.value = false; previewEntry.value = null; editing.value = false
 }
 
-function download(entry: FileEntry) {
-  const a = document.createElement('a')
-  a.href     = `/api/servers/${props.serverId}/files/download?path=${encodeURIComponent(entry.path)}`
-  a.download = entry.name
-  a.click()
+async function download(entry: FileEntry) {
+ try {const blob=await api.files.download(props.serverId,entry.path);const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=entry.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+ catch(e){toast.error(e instanceof Error?e.message:'Download failed')}
 }
 
 async function onFileSelected(e: Event) {
@@ -207,7 +205,7 @@ async function onFileSelected(e: Event) {
 async function deleteEntry(entry: FileEntry) {
   const ok = await confirm({
     title:       entry.isDir ? 'Remove directory' : 'Delete file',
-    message:     `Delete "${entry.name}"? This cannot be undone.`,
+    message: `Delete ${entry.path} on ${props.serverId}? ${entry.isDir ? 'This recursively removes directory contents; an interrupted deletion may be partial.' : 'This cannot be undone.'}`,
     confirmText: 'Delete', destructive: true,
   })
   if (!ok) return

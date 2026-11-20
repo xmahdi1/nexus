@@ -109,3 +109,42 @@ test('invitation authority and reset proofs are sent in request bodies', async (
     assert.equal(calls[2].body.token,'private-token')
     assert.ok(calls.every(call=>!call.url.includes('private-token')))
 })
+
+test('downloads use the common auth/proxy flow and enforce a bounded blob',async()=>{
+ globalThis.fetch=async()=>new Response('<html>proxy</html>',{headers:{'content-type':'text/html'}})
+ await assert.rejects(api.files.download('fixture','/private'),{code:'upstream_html'})
+ globalThis.fetch=async()=>Response.json({error:'Expired',code:'invalid_session'},{status:401})
+ await assert.rejects(api.files.download('fixture','/private'),{code:'invalid_session'})
+ assert.equal(window.location.href,'/login')
+ globalThis.fetch=async()=>new Response('fixture',{headers:{'content-type':'application/octet-stream'}})
+ assert.equal(await (await api.files.download('fixture','/private')).text(),'fixture')
+ globalThis.fetch=async()=>new Response('fixture',{headers:{'content-length':String(65*1024*1024)}})
+ await assert.rejects(api.files.download('fixture','/private'),/64 MiB/)
+})
+
+test('session probes return control to route guards without hard-reloading login',async()=>{
+ globalThis.fetch=async()=>Response.json({error:'Expired',code:'invalid_session'},{status:401})
+ await assert.rejects(api.auth.me(),{code:'invalid_session'});assert.equal(window.location.href,'')
+ await assert.rejects(api.auth.permissions(),{code:'invalid_session'});assert.equal(window.location.href,'')
+})
+
+test('Compose 200 ok:false rejects and preserves the server operation ID',async()=>{
+ const operationId='a'.repeat(32)
+ globalThis.fetch=async()=>Response.json({ok:false,error:'Deployment failed',output:'fixture'},{headers:{'X-Operation-ID':operationId}})
+ await assert.rejects(api.compose.up('dev','/tmp/recipe.yml'),error=>error.operationId===operationId&&error.message.includes('Deployment failed')&&error.message.includes(operationId))
+})
+test('A lost mutation response warns of uncertain state without retrying',async()=>{
+ let calls=0;globalThis.fetch=async()=>{calls++;throw new TypeError('Failed to fetch')}
+ await assert.rejects(api.containers.restart('dev','aaaaaaaaaaaa'),{code:'remote_outcome_unknown'})
+ assert.equal(calls,1)
+})
+test('Operation inspection is an encoded read-only bounded request',async()=>{
+ globalThis.fetch=async(url,options)=>{assert.equal(options.method,'GET');assert.equal(url,'/api/audit/operations/fixture%3Aoperation');assert.ok(options.signal);return Response.json({state:'pending',automaticRetryAllowed:false})}
+ assert.equal((await api.audit.inspect('fixture:operation')).state,'pending')
+})
+
+test('A truncated mutation response retains its operation ID and uncertain outcome',async()=>{
+ const operationId='b'.repeat(32)
+ globalThis.fetch=async()=>new Response('{"ok":',{headers:{'Content-Type':'application/json','X-Operation-ID':operationId}})
+ await assert.rejects(api.containers.restart('dev','aaaaaaaaaaaa'),error=>error.code==='remote_outcome_unknown'&&error.operationId===operationId)
+})

@@ -8,6 +8,22 @@ export interface DeviceSession {
     id: string; createdAt: string; lastUsedAt: string; expiresAt: string; deviceLabel: string; clientIP: string
 }
 
+export interface OperationInspection {
+ id:string;state:string;action:string;actorId:string;serverId:string;resourceType:string;resourceId:string;
+ startedAt:string;completedAt:string|null;remoteStateVerified:boolean;automaticRetryAllowed:boolean;guidance:string
+}
+
+export interface VaultProfile {serverId?:string;port:number;tlsName:string;caPem:string;namespace:string}
+export interface VaultConnection {configured:boolean;profile?:VaultProfile}
+export interface VaultAccessInput {token:string;name?:string;paths?:string[]}
+export interface VaultAdminField {key:string;label:string;kind:string;required:boolean;choices?:string[]}
+export interface VaultAdminOperation {id:string;group:string;label:string;notice:string;fields:VaultAdminField[];permissions:string[];mutation:boolean;sensitive:boolean}
+export interface VaultAdminResult {dataJson:string;revision?:string;redacted?:boolean;automaticRetryAllowed:false}
+export interface VaultAccessResult {methods?:{path:string;type:string;description:string;defaultTTL?:number;maxTTL?:number}[];policies?:string[];name?:string;policy?:string;redacted?:boolean;capabilities?:Record<string,string[]>}
+export interface VaultKVInput {token:string;mount:string;path:string;version?:number;dataJson?:string}
+export interface VaultKVResult {keys?:string[];metadata?:{version:number};dataJson?:string;automaticRetryAllowed:false}
+export interface VaultObservation {health:{initialized:boolean;sealed:boolean;standby:boolean;status:number};mounts:{path:string;type:string;description:string;version:string}[];mountsStatus:string}
+
 const BASE = '/api'
 
 export interface ApiError {
@@ -151,6 +167,7 @@ export interface ServerAlertConfig {
 }
 
 export interface TemplateVar {
+ storedDefault?:boolean;
     name: string;
     label: string;
     description: string;
@@ -222,6 +239,7 @@ export interface FirewallStatus {
 }
 
 export interface ScheduledTask {
+	 supervised: boolean;
     actorId: string;
     createdBy: string;
     id: string;
@@ -237,15 +255,47 @@ export interface ScheduledTask {
     createdAt: string
 }
 
+export interface SupervisedRun {
+    id: string; taskId: string; serverId: string; actorId: string; state: string;
+    exitCode: number | null; truncated: boolean; artifactsRemoved: boolean;
+    detail: string; createdAt: string; dispatchStartedAt: string | null; cancelRequestedAt: string | null;
+    verifiedAt: string | null; finishedAt: string | null;
+}
+export interface RunObservation {
+    run: SupervisedRun;
+    observation: {state: string; verified: boolean; empty: boolean; exitCode: number | null; output: string; truncated: boolean; released: boolean; detail: string; noDispatch: boolean};
+    automaticRetryAllowed: false;
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await fetch(`${BASE}${path}`, {
+    let res:Response
+    try {res = await fetch(`${BASE}${path}`, {
         method,
         signal: AbortSignal.timeout(60_000),
         credentials: 'include',
         headers: body ? {'Content-Type': 'application/json'} : {},
         body: body ? JSON.stringify(body) : undefined,
-    })
-    return decodeResponse<T>(res,path)
+    })} catch(error) {
+      if(!['GET','HEAD','OPTIONS'].includes(method))throw Object.assign(new Error('Request interrupted; the remote outcome may be uncertain. Inspect the target before retrying.'),{code:'remote_outcome_unknown',cause:error})
+      throw error
+    }
+    try{return await decodeResponse<T>(res,path)}catch(error){
+      if(!['GET','HEAD','OPTIONS'].includes(method)&&!(error as {status?:number})?.status){
+        throw responseError(res,{error:'Response interrupted; the remote outcome may be uncertain. Inspect the target before retrying.',code:'remote_outcome_unknown'})
+      }
+      throw error
+    }
+}
+
+async function downloadFile(path:string):Promise<Blob>{
+ const response=await fetch(`${BASE}${path}`,{credentials:'include',signal:AbortSignal.timeout(60_000)})
+ if(!response.ok || (response.headers.get('content-type')??'').includes('text/html'))return decodeResponse<never>(response,path)
+ const max=64*1024*1024
+ if(Number(response.headers.get('content-length'))>max)throw new Error('Browser downloads are limited to 64 MiB.')
+ const reader=response.body?.getReader();if(!reader)return new Blob([])
+ const chunks:Uint8Array[]= [];let total=0
+ try{while(true){const {done,value}=await reader.read();if(done)break;total+=value.byteLength;if(total>max){await reader.cancel();throw new Error('Browser downloads are limited to 64 MiB.')}chunks.push(new Uint8Array(value))}}finally{reader.releaseLock()}
+ return new Blob(chunks,{type:'application/octet-stream'})
 }
 
 async function decodeResponse<T>(res: Response,path: string): Promise<T> {
@@ -261,18 +311,43 @@ async function decodeResponse<T>(res: Response,path: string): Promise<T> {
             json = await res.json()
         } catch {
         }
-        if (res.status === 401 && !['/auth/invitations/accept','/auth/reset/info','/auth/reset/password','/auth/reset/mfa/setup','/auth/reset/mfa/confirm','/auth/mfa/recovery', '/auth/mfa/recovery-codes', '/auth/login', '/auth/password', '/auth/mfa/verify', '/auth/mfa/setup', '/auth/mfa/enable', '/auth/mfa/disable'].includes(path)) {
+        if (res.status === 401 && window.location.pathname !== '/login' && !['/auth/me','/auth/permissions','/auth/invitations/accept','/auth/reset/info','/auth/reset/password','/auth/reset/mfa/setup','/auth/reset/mfa/confirm','/auth/mfa/recovery', '/auth/mfa/recovery-codes', '/auth/step-up', '/auth/login', '/auth/password', '/auth/mfa/verify', '/auth/mfa/setup', '/auth/mfa/enable', '/auth/mfa/disable'].includes(path)) {
             window.location.href = '/login'
         }
-        throw Object.assign(new Error(json.error ?? `HTTP ${res.status}`), json)
+        throw responseError(res,json)
     }
 
     if (res.status === 204) return undefined as T
-    return res.json() as Promise<T>
+    const data=await res.json()
+    if (/^\/servers\/[^/]+\/compose\/(up|down)\?/.test(path) && data?.ok === false) throw responseError(res,data)
+    return data as T
+}
+function responseError(res:Response,data:any):Error {
+ const candidate=res.headers.get('X-Operation-ID')??''
+ const operationId=/^[a-f0-9]{32}$/.test(candidate)?candidate:''
+ const message=String(data.error??`HTTP ${res.status}`)+(operationId?` (operation ${operationId}; inspect audit and target state before retrying)`:'')
+ return Object.assign(new Error(message),data,{message,operationId,status:res.status})
 }
 
 export const api = {
+ vault: {
+  operations:(id:string)=>request<{operations:VaultAdminOperation[];supportedEdition:string;namespaces:boolean}>('GET',`/servers/${encodeURIComponent(id)}/vault/admin/operations`),
+  admin:(id:string,action:string,input:{token:string;params:Record<string,unknown>;confirmation?:string})=>request<VaultAdminResult>('POST',`/servers/${encodeURIComponent(id)}/vault/admin/${encodeURIComponent(action)}`,input),
+  access:(id:string,action:'auth'|'policies'|'policy'|'capabilities',input:VaultAccessInput)=>request<VaultAccessResult>('POST',`/servers/${encodeURIComponent(id)}/vault/access/${action}`,input),
+  kv:(id:string,action:'list'|'metadata'|'read'|'write',input:VaultKVInput)=>request<VaultKVResult>('POST',`/servers/${encodeURIComponent(id)}/vault/kv/${action}`,input),
+  read:(id:string)=>request<VaultConnection>('GET',`/servers/${encodeURIComponent(id)}/vault`),
+  save:(id:string,profile:VaultProfile)=>request<{ok:boolean}>('PUT',`/servers/${encodeURIComponent(id)}/vault`,profile),
+  remove:(id:string)=>request<void>('DELETE',`/servers/${encodeURIComponent(id)}/vault`),
+  inspect:(id:string,token:string)=>request<VaultObservation>('POST',`/servers/${encodeURIComponent(id)}/vault/inspect`,{token}),
+ },
+ features:()=>request<{inventory:boolean;jobSupervision:boolean;vault:boolean}>('GET','/features'),
+ inventory:{
+ read:(id:string,after='')=>request<{items:Array<{id:string;kind:string;displayName:string;source:string;dataState:string;lastVerifiedAt:string;details:unknown}>;runs:Array<{id:string;status:string;warning:string;startedAt:string}>;changes:unknown[];next:string}>('GET',`/servers/${encodeURIComponent(id)}/inventory?after=${encodeURIComponent(after)}`),
+ discover:(id:string)=>request<{status:string;warning:string}>('POST',`/servers/${encodeURIComponent(id)}/inventory/discover`,{}),
+ },
+ audit: {inspect:(operationId:string)=>request<OperationInspection>('GET','/audit/operations/'+encodeURIComponent(operationId)),list:(filters:Record<string,string>={})=>request<{items:Array<{id:number;at:string;operationId:string;actorId:string;action:string;resourceId:string;outcome:string;httpStatus:number;source:string}>;next:string}>('GET','/audit/events?'+new URLSearchParams({...filters,limit:'50'}).toString())},
     auth: {
+        stepUp:(currentPassword:string,code:string)=>request<{ok:boolean}>('POST','/auth/step-up',{currentPassword,code}),
         login: (password: string, username = '', deviceLabel = '') =>
             request<{ ok: boolean; mfaRequired: boolean; pendingToken?: string }>('POST', '/auth/login', {password, username, deviceLabel}),
         logout: () => request<{ ok: boolean }>('POST', '/auth/logout'),
@@ -314,9 +389,10 @@ export const api = {
     access: {
         roles: () => request<Array<{id: string; name: string; permissions: string[]}>>('GET','/roles'),
         grants: () => request<Array<{id: string; principalId: string; principalKind: string; roleId: string; scopeType: string; scopeId: string; createdBy: string}>>('GET','/grants'),
-        groups: () => request<Array<{id: string; name: string; serverIds: string[]}>>('GET','/server-groups'),
+        groups: () => request<Array<{id: string; name: string; serverIds: string[];requireMfa:boolean}>>('GET','/server-groups'),
         addGrant: (principalId: string, roleId: string, scopeType: string, scopeId: string, currentPassword: string) => request('POST','/grants',{principalId,roleId,scopeType,scopeId,currentPassword}),
         deleteGrant: (id: string, currentPassword: string) => request<void>('DELETE',`/grants/${encodeURIComponent(id)}`,{currentPassword}),
+        groupPolicy:(id:string,requireMfa:boolean,currentPassword:string)=>request('PUT',`/server-groups/${encodeURIComponent(id)}/policy`,{requireMfa,currentPassword}),
         createGroup: (name: string, currentPassword: string) => request('POST','/server-groups',{name,currentPassword}),
         deleteGroup: (id: string, currentPassword: string) => request<void>('DELETE',`/server-groups/${encodeURIComponent(id)}`,{currentPassword}),
         membership: (group: string, server: string, remove: boolean, currentPassword: string) => request(remove ? 'DELETE' : 'PUT',`/server-groups/${encodeURIComponent(group)}/servers/${encodeURIComponent(server)}`,{currentPassword}),
@@ -380,7 +456,7 @@ export const api = {
         write: (sid: string, path: string, content: string) =>
             request<{ ok: boolean }>('PUT', `/servers/${sid}/files`, {path, content}),
         download: (_sid: string, path: string) =>
-            `/api/servers/${_sid}/files/download?path=${encodeURIComponent(path)}`,
+            downloadFile(`/servers/${encodeURIComponent(_sid)}/files/download?path=${encodeURIComponent(path)}`),
         upload: (sid: string, dirPath: string, file: File) => {
             const form = new FormData()
             form.append('file', file)
@@ -410,8 +486,8 @@ export const api = {
             request<ProxyRule>('PUT', `/servers/${sid}/proxy/${ruleId}`, data),
         delete: (sid: string, ruleId: string) =>
             request<void>('DELETE', `/servers/${sid}/proxy/${ruleId}`),
-        enableSSL: (sid: string, ruleId: string, data: { email: string; wildcard: boolean; cfToken: string }) =>
-            request<{ rule: ProxyRule; output: string }>('POST', `/servers/${sid}/proxy/${ruleId}/ssl`, data),
+        enableSSL: (sid: string, ruleId: string, data: { email: string; wildcard: boolean; cfToken: string; renew?: boolean }) =>
+            request<{ rule: ProxyRule; output: string; warning?: string; dnsCleanupStatus?: 'unverified' | 'reported_failure' }>('POST', `/servers/${sid}/proxy/${ruleId}/ssl`, data),
     },
 
     services: {
@@ -436,6 +512,7 @@ export const api = {
 
     templates: {
         list: () => request<AppTemplate[]>('GET', '/templates'),
+ getCustom:(id:string)=>request<AppTemplate & {compose:string}>('GET','/templates/custom/'+encodeURIComponent(id)),
         createCustom: (data: Partial<AppTemplate> & { compose: string }) =>
             request<AppTemplate>('POST', '/templates/custom', data),
         updateCustom: (id: string, data: Partial<AppTemplate> & { compose: string }) =>
@@ -468,12 +545,17 @@ export const api = {
 
     tasks: {
         list: (sid: string) => request<ScheduledTask[]>('GET', `/servers/${sid}/tasks`),
-        create: (sid: string, d: { name: string; command: string; intervalMinutes: number }) =>
+        create: (sid: string, d: { name: string; command: string; intervalMinutes: number; supervised?: boolean }) =>
             request<ScheduledTask>('POST', `/servers/${sid}/tasks`, d),
         update: (sid: string, tid: string, d: Partial<ScheduledTask>) =>
             request<ScheduledTask>('PUT', `/servers/${sid}/tasks/${tid}`, d),
         delete: (sid: string, tid: string) => request<void>('DELETE', `/servers/${sid}/tasks/${tid}`),
         runNow: (sid: string, tid: string) => request<{ ok: string }>('POST', `/servers/${sid}/tasks/${tid}/run`),
+        runs: (sid: string,tid:string)=>request<SupervisedRun[]>('GET',`/servers/${encodeURIComponent(sid)}/tasks/${encodeURIComponent(tid)}/runs`),
+        readRun: (sid:string,tid:string,rid:string)=>request<RunObservation>('GET',`/servers/${encodeURIComponent(sid)}/tasks/${encodeURIComponent(tid)}/runs/${encodeURIComponent(rid)}`),
+        inspectRun:(sid:string,tid:string,rid:string)=>request<RunObservation>('POST',`/servers/${encodeURIComponent(sid)}/tasks/${encodeURIComponent(tid)}/runs/${encodeURIComponent(rid)}/inspect`),
+        cancelRun:(sid:string,tid:string,rid:string)=>request<RunObservation>('POST',`/servers/${encodeURIComponent(sid)}/tasks/${encodeURIComponent(tid)}/runs/${encodeURIComponent(rid)}/cancel`),
+        releaseRun:(sid:string,tid:string,rid:string)=>request<RunObservation>('DELETE',`/servers/${encodeURIComponent(sid)}/tasks/${encodeURIComponent(tid)}/runs/${encodeURIComponent(rid)}/artifacts`),
     },
     firewall: {
         status: (sid: string) =>
@@ -492,6 +574,7 @@ export const api = {
             request<{ ok: boolean }>('DELETE', `/servers/${sid}/firewall/rules/${n}`),
     },
     ws: {
+ metrics:(id:string)=>`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/metrics/${encodeURIComponent(id)}`,
         terminal: (sid: string) =>
             `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/terminal/${sid}`,
         logs: (sid: string, cid: string) =>
