@@ -1,6 +1,9 @@
 package authorization
 
-import "strings"
+import (
+	"github.com/xmahdi1/nexus/internal/vault"
+	"strings"
+)
 
 const LegacyPrincipal = "legacy-admin"
 const MonitorPrincipal = "system-monitor"
@@ -46,6 +49,30 @@ func self(method, path string) {
 	Policies = append(Policies, Policy{Method: method, Path: path, Self: true})
 }
 func init() {
+	self("GET", "/api/features")
+	for _, method := range []string{"GET", "PUT", "DELETE"} {
+		register(method, "/api/servers/{id}/vault", "server", "integrations.manage servers.read")
+	}
+	register("POST", "/api/servers/{id}/vault/inspect", "server", "integrations.manage servers.connect secrets.use")
+	for _, action := range []string{"auth", "capabilities"} {
+		register("POST", "/api/servers/{id}/vault/access/"+action, "server", "integrations.manage servers.connect secrets.use secrets.metadata.read")
+	}
+	for _, action := range []string{"policies", "policy"} {
+		register("POST", "/api/servers/{id}/vault/access/"+action, "server", "integrations.manage servers.connect secrets.use roles.manage")
+	}
+	for _, action := range []string{"list", "metadata"} {
+		register("POST", "/api/servers/{id}/vault/kv/"+action, "server", "integrations.manage servers.connect secrets.use secrets.metadata.read")
+	}
+	register("POST", "/api/servers/{id}/vault/kv/read", "server", "integrations.manage servers.connect secrets.use secrets.reveal")
+	register("POST", "/api/servers/{id}/vault/kv/write", "server", "integrations.manage servers.connect secrets.use secrets.create")
+	register("GET", "/api/servers/{id}/vault/admin/operations", "server", "integrations.manage servers.connect secrets.use")
+	for _, op := range vault.AdminOperations() {
+		register("POST", "/api/servers/{id}/vault/admin/"+op.ID, "server", strings.Join(op.Permissions, " "))
+	}
+	register("GET", "/api/servers/{id}/inventory", "server", "inventory.read")
+	register("POST", "/api/servers/{id}/inventory/discover", "server", "inventory.discover secrets.use")
+	self("POST", "/api/auth/step-up")
+	register("PUT", "/api/server-groups/{gid}/policy", "global", "roles.manage groups.manage")
 	for _, row := range []string{"GET /api/users users.read", "GET /api/users/invitations users.read", "POST /api/users/invitations users.manage", "DELETE /api/users/invitations/{inviteId} users.manage", "PATCH /api/users/{uid} users.manage", "POST /api/users/{uid}/resets users.manage", "POST /api/users/{uid}/unlock users.manage"} {
 		p := strings.Fields(row)
 		permissions := p[2]
@@ -60,6 +87,8 @@ func init() {
 		self(parts[0], parts[1])
 	}
 	register("GET", "/api/auth/audit", "global", "audit.read")
+	register("GET", "/api/audit/events", "global", "audit.read")
+	register("GET", "/api/audit/operations/{operationId}", "global", "audit.read")
 	register("POST", "/api/keys/generate", "global", "secrets.create")
 	register("GET", "/api/servers", "collection", "servers.read")
 	register("POST", "/api/servers", "global", "servers.create secrets.create")
@@ -122,6 +151,11 @@ func init() {
 	register("PUT", "/api/servers/{id}/tasks/{tid}", "server", "jobs.manage jobs.execute servers.execute secrets.use")
 	register("DELETE", "/api/servers/{id}/tasks/{tid}", "server", "jobs.manage")
 	register("POST", "/api/servers/{id}/tasks/{tid}/run", "server", "jobs.execute servers.execute secrets.use")
+	register("GET", "/api/servers/{id}/tasks/{tid}/runs", "server", "jobs.read logs.read")
+	register("GET", "/api/servers/{id}/tasks/{tid}/runs/{rid}", "server", "jobs.read logs.read secrets.use")
+	register("POST", "/api/servers/{id}/tasks/{tid}/runs/{rid}/inspect", "server", "jobs.read logs.read servers.execute secrets.use")
+	register("POST", "/api/servers/{id}/tasks/{tid}/runs/{rid}/cancel", "server", "jobs.cancel servers.execute secrets.use")
+	register("DELETE", "/api/servers/{id}/tasks/{tid}/runs/{rid}/artifacts", "server", "jobs.manage logs.read servers.execute secrets.use")
 	register("GET", "/api/servers/{id}/firewall", "server", "firewall.read network.read secrets.use")
 	for _, row := range []string{"POST enable", "POST disable", "POST rules", "DELETE rules/{n}"} {
 		p := strings.Fields(row)

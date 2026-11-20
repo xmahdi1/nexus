@@ -23,6 +23,7 @@ import (
 	"github.com/xmahdi1/nexus/internal/static"
 	"github.com/xmahdi1/nexus/internal/templates"
 	"github.com/xmahdi1/nexus/internal/terminal"
+	"github.com/xmahdi1/nexus/internal/vault"
 	"gorm.io/gorm"
 )
 
@@ -31,8 +32,8 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
+	r.Use(nexusMW.RequestLog)
+	r.Use(nexusMW.Recoverer)
 	r.Use(middleware.CleanPath)
 	r.Use(nexusMW.Security(cfg))
 	r.Use(corsMiddleware)
@@ -51,13 +52,14 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 	filesH := filemanager.NewHandler(db, cfg.EncryptionKey, pool)
 	termH := terminal.NewHandler(db, cfg.EncryptionKey, pool, cfg.EncryptionKey)
 	logsH := docker.NewLogsHandler(db, cfg.EncryptionKey, pool, cfg.EncryptionKey)
-	proxyH := proxy.NewHandler(db, cfg.EncryptionKey, pool)
+	proxyH := proxy.NewHandler(db, cfg.EncryptionKey, pool, cfg.ACME)
 	svcH := handlers.NewServicesHandler(db)
 	monH := handlers.NewMonitorHandler(db, mon)
 	tplH := templates.NewHandler(db, cfg.EncryptionKey, pool)
 	cronH := handlers.NewCronHandler(db, cfg.EncryptionKey, pool)
 	execH := handlers.NewExecHandler(db, cfg.EncryptionKey, pool)
-	tasksH := handlers.NewTasksHandler(db)
+	tasksH := handlers.NewTasksHandler(db, cfg.JobSupervisionEnabled)
+	runsH := handlers.NewSupervisedRunsHandler(db, cfg.EncryptionKey, pool)
 	fwH := handlers.NewFirewallHandler(db, []byte(cfg.EncryptionKey), pool)
 
 	r.With(nexusMW.LoginRateLimit).Post("/api/auth/login", authH.Login)
@@ -81,6 +83,32 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 		r.With(nexusMW.CredentialRateLimit).Post("/api/users/{uid}/unlock", accountsH.Unlock)
 		r.With(nexusMW.CredentialRateLimit).Post("/api/auth/mfa/recovery-codes", accountsH.Regenerate)
 		r.Get("/api/auth/me", authH.Me)
+		r.Get("/api/features", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]bool{"inventory": cfg.InventoryEnabled, "jobSupervision": cfg.JobSupervisionEnabled, "vault": cfg.VaultEnabled})
+		})
+		vaultH := handlers.NewVaultHandler(db, cfg.EncryptionKey, pool, cfg.VaultEnabled)
+		r.Get("/api/servers/{id}/vault", vaultH.Read)
+		r.Put("/api/servers/{id}/vault", vaultH.Save)
+		r.Delete("/api/servers/{id}/vault", vaultH.Delete)
+		r.With(nexusMW.VaultRateLimit).Post("/api/servers/{id}/vault/inspect", vaultH.Inspect)
+		r.With(nexusMW.VaultRateLimit).Post("/api/servers/{id}/vault/access/auth", vaultH.AuthMethods)
+		r.With(nexusMW.VaultRateLimit).Post("/api/servers/{id}/vault/access/policies", vaultH.Policies)
+		r.With(nexusMW.VaultRateLimit).Post("/api/servers/{id}/vault/access/policy", vaultH.Policy)
+		r.With(nexusMW.VaultRateLimit).Post("/api/servers/{id}/vault/access/capabilities", vaultH.Capabilities)
+		r.With(nexusMW.VaultRateLimit).Post("/api/servers/{id}/vault/kv/list", vaultH.KVList)
+		r.With(nexusMW.VaultRateLimit).Post("/api/servers/{id}/vault/kv/metadata", vaultH.KVMetadata)
+		r.With(nexusMW.VaultRateLimit).Post("/api/servers/{id}/vault/kv/read", vaultH.KVRead)
+		r.With(nexusMW.VaultRateLimit).Post("/api/servers/{id}/vault/kv/write", vaultH.KVWrite)
+		r.Get("/api/servers/{id}/vault/admin/operations", vaultH.AdminOperations)
+		for _, op := range vault.AdminOperations() {
+			r.With(nexusMW.VaultRateLimit).Post("/api/servers/{id}/vault/admin/"+op.ID, vaultH.Admin(op.ID))
+		}
+		inventoryH := handlers.NewInventoryHandler(db, cfg, pool)
+		r.Get("/api/servers/{id}/inventory", inventoryH.Read)
+		r.With(nexusMW.CredentialRateLimit).Post("/api/servers/{id}/inventory/discover", inventoryH.Discover)
+		r.With(nexusMW.CredentialRateLimit).Post("/api/auth/step-up", policyH.StepUp)
+		r.With(nexusMW.CredentialRateLimit).Put("/api/server-groups/{gid}/policy", policyH.SetGroupPolicy)
 		r.Get("/api/auth/permissions", policyH.Permissions)
 		r.Get("/api/roles", policyH.Roles)
 		r.Get("/api/grants", policyH.Grants)
@@ -92,6 +120,8 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 		r.With(nexusMW.CredentialRateLimit).Delete("/api/server-groups/{gid}/servers/{serverId}", policyH.Membership)
 		r.With(nexusMW.CredentialRateLimit).Delete("/api/server-groups/{gid}", policyH.DeleteGroup)
 		r.Get("/api/authorization/events", policyH.Events)
+		r.Get("/api/audit/events", handlers.NewAuditHandler(db).List)
+		r.Get("/api/audit/operations/{operationId}", handlers.NewAuditHandler(db).Inspect)
 		r.Get("/api/auth/sessions", authH.Sessions)
 		r.Delete("/api/auth/sessions/{sid}", authH.RevokeSession)
 		r.Post("/api/auth/logout-all", authH.LogoutAll)
@@ -156,7 +186,7 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 
 		r.Get("/api/templates", tplH.List)
 		r.Post("/api/templates/custom", tplH.CreateCustom)
-		r.Get("/api/templates/custom/{id}",tplH.GetCustom)
+		r.Get("/api/templates/custom/{id}", tplH.GetCustom)
 		r.Put("/api/templates/custom/{id}", tplH.UpdateCustom)
 		r.Delete("/api/templates/custom/{id}", tplH.DeleteCustom)
 		r.Get("/api/servers/{id}/apps", tplH.ListDeployed)
@@ -172,6 +202,11 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 		r.Put("/api/servers/{id}/tasks/{tid}", tasksH.Update)
 		r.Delete("/api/servers/{id}/tasks/{tid}", tasksH.Delete)
 		r.Post("/api/servers/{id}/tasks/{tid}/run", tasksH.RunNow)
+		r.Get("/api/servers/{id}/tasks/{tid}/runs", runsH.List)
+		r.Get("/api/servers/{id}/tasks/{tid}/runs/{rid}", runsH.Read)
+		r.Post("/api/servers/{id}/tasks/{tid}/runs/{rid}/inspect", runsH.Inspect)
+		r.Post("/api/servers/{id}/tasks/{tid}/runs/{rid}/cancel", runsH.Cancel)
+		r.Delete("/api/servers/{id}/tasks/{tid}/runs/{rid}/artifacts", runsH.Release)
 
 		r.Get("/api/servers/{id}/firewall", fwH.Status)
 		r.Post("/api/servers/{id}/firewall/enable", fwH.Enable)
