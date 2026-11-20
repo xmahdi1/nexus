@@ -82,3 +82,17 @@ func TestAtomicLegacyConfigAndSnapshots(t *testing.T) {
 		t.Fatal("failed write changed live MFA")
 	}
 }
+
+func TestInventoryRequiresExplicitOptIn(t *testing.T) {
+	t.Setenv("NEXUS_PASSWORD_HASH", "fixture")
+	t.Setenv("NEXUS_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32)))
+	t.Setenv("NEXUS_SESSION_IDLE_TTL", "")
+	t.Setenv("NEXUS_SESSION_ABSOLUTE_TTL", "")
+	for _, value := range []string{"", "false", "true"} {
+		t.Setenv("NEXUS_ENABLE_INVENTORY", value)
+		cfg, err := Load()
+		if err != nil || cfg.InventoryEnabled != (value == "true") {
+			t.Fatal("wrong opt-in behavior", value, err)
+		}
+	}
+}
