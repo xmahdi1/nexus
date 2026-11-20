@@ -138,7 +138,7 @@ func (s *Service) CreateGroup(actor, name, request string) (Group, error) {
 		if err != nil {
 			return err
 		}
-		group = Group{ID: id, Name: name, CreatedAt: time.Now().UTC()}
+		group = Group{RequireMFA: strings.EqualFold(strings.TrimSpace(name), "production"), ID: id, Name: name, CreatedAt: time.Now().UTC()}
 		if err := tx.Create(&group).Error; err != nil {
 			return err
 		}

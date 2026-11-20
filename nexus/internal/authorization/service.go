@@ -3,7 +3,9 @@ package authorization
 import (
 	"context"
 	"errors"
+	"github.com/xmahdi1/nexus/internal/audit"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/xmahdi1/nexus/internal/models"
@@ -35,9 +37,10 @@ type Grant struct {
 func (Grant) TableName() string { return "role_grants" }
 
 type Group struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"createdAt"`
+	RequireMFA bool      `json:"requireMfa"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
 func (Group) TableName() string { return "server_groups" }
@@ -137,8 +140,52 @@ func (s *Service) Collection(actor, permission string) bool {
 	return s.DB.Table("role_grants g").Joins("JOIN role_permissions p ON p.role_id=g.role_id").Joins("JOIN roles r ON r.id=g.role_id").Where("g.principal_id=? AND g.principal_kind=? AND p.permission_key=?", actor, kind, permission).Where(`((g.scope_type='global' AND g.scope_id='') OR (g.scope_type='server' AND EXISTS(SELECT 1 FROM servers s WHERE s.id=g.scope_id)) OR (g.scope_type='server_group' AND EXISTS(SELECT 1 FROM server_groups sg WHERE sg.id=g.scope_id)))`).Count(&count).Error == nil && count > 0
 }
 
-func (s *Service) Record(actor, action, resource, outcome, request string) error {
-	return s.DB.Create(&Event{At: time.Now().UTC(), ActorID: actor, Action: action, ResourceID: resource, Outcome: outcome, RequestID: request}).Error
+func (s *Service) Record(actor, action, resource, outcome, request string, sessions ...string) error {
+	actor = audit.Identifier(actor)
+	resource = audit.Identifier(resource)
+	session := ""
+	if len(sessions) > 0 {
+		session = sessions[0]
+	}
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&Event{At: time.Now().UTC(), ActorID: actor, Action: action, ResourceID: resource, Outcome: outcome, RequestID: audit.RequestIdentifier(request)}).Error; err != nil {
+			return err
+		}
+		id, err := audit.NewID()
+		if err != nil {
+			return err
+		}
+		operation := id
+		if action == "tasks.execute" && request != "" {
+			operation = audit.Identifier(request)
+		}
+		event := audit.Event{OperationID: operation, ActorID: actor, SessionID: session, Action: action, ResourceType: "policy_or_account", ResourceID: resource, Source: "domain", Outcome: outcome, RequestID: request}
+		if action == "tasks.execute" {
+			event.Source = "worker"
+			event.ResourceType = "task"
+			var task struct{ ServerID string }
+			if err := tx.Table("scheduled_tasks").Select("server_id").Where("id=?", resource).Find(&task).Error; err != nil {
+				return err
+			}
+			event.ServerID = task.ServerID
+		} else if action == "inventory.discover" {
+			event.Source = "collector"
+			event.ResourceType = "server"
+			event.ServerID = resource
+			if request != "" {
+				event.OperationID = request
+			}
+		} else if parts := strings.SplitN(action, " ", 2); len(parts) == 2 {
+			if policy, _, ok := Resolve(parts[0], parts[1]); ok {
+				event.Source = "authorization"
+				if policy.Scope == "server" {
+					event.ResourceType = "server"
+					event.ServerID = resource
+				}
+			}
+		}
+		return audit.Append(tx, event)
+	})
 }
 func (s *Service) Allowed(actor string, policy Policy, server string) bool {
 	if policy.Self {
