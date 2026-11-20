@@ -12,6 +12,13 @@ const originalWindow = globalThis.window
 const originalStorage = globalThis.localStorage
 const originalEvent = globalThis.CustomEvent
 let events = []
+
+test('interactive operations bind request identity and never replay a lost response',async()=>{
+ let calls=0
+ globalThis.fetch=async(url,options)=>{calls++;assert.equal(url,'/api/servers/fixture/operations/compose/up');assert.deepEqual(JSON.parse(options.body),{requestId:'a'.repeat(32),path:'/opt/fixture.yml'});throw new TypeError('fixture response lost')}
+ await assert.rejects(api.operations.start('fixture','compose-up','a'.repeat(32),{path:'/opt/fixture.yml'}),{code:'remote_outcome_unknown'})
+ assert.equal(calls,1)
+})
 globalThis.window = {dispatchEvent: e => events.push(e.type), location: {href: ''}}
 globalThis.localStorage = {removeItem() {}}
 globalThis.CustomEvent = class {constructor(type) {this.type = type}}

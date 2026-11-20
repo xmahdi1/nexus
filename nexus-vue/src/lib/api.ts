@@ -266,6 +266,8 @@ export interface RunObservation {
     observation: {state: string; verified: boolean; empty: boolean; exitCode: number | null; output: string; truncated: boolean; released: boolean; detail: string; noDispatch: boolean};
     automaticRetryAllowed: false;
 }
+export type ServerOperation = 'compose-up'|'compose-down'|'container-start'|'container-stop'|'container-restart'|'container-remove'
+export interface InteractiveRun extends SupervisedRun {kind:'operation';action:ServerOperation;targetId:string}
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
     let res:Response
@@ -330,6 +332,19 @@ function responseError(res:Response,data:any):Error {
 }
 
 export const api = {
+ operations:{
+  start:(sid:string,action:ServerOperation,requestId:string,target:{path?:string;cid?:string})=>{
+   const compose=action.startsWith('compose-')
+   if(compose?(!target.path||!!target.cid):(!target.cid||!!target.path))throw new Error('Choose one valid operation target.')
+   const suffix=compose?'compose/'+action.slice('compose-'.length):'containers/'+encodeURIComponent(target.cid!)+ '/'+action.slice('container-'.length)
+   return request<{run:InteractiveRun;automaticRetryAllowed:false}>('POST',`/servers/${encodeURIComponent(sid)}/operations/${suffix}`,{requestId,...(compose?{path:target.path}:{})})
+  },
+  list:(sid:string)=>request<InteractiveRun[]>('GET',`/servers/${encodeURIComponent(sid)}/operations/runs`),
+  read:(sid:string,id:string)=>request<RunObservation>('GET',`/servers/${encodeURIComponent(sid)}/operations/runs/${encodeURIComponent(id)}`),
+  inspect:(sid:string,id:string)=>request<RunObservation>('POST',`/servers/${encodeURIComponent(sid)}/operations/runs/${encodeURIComponent(id)}/inspect`),
+  cancel:(sid:string,id:string)=>request<RunObservation>('POST',`/servers/${encodeURIComponent(sid)}/operations/runs/${encodeURIComponent(id)}/cancel`),
+  release:(sid:string,id:string)=>request<RunObservation>('DELETE',`/servers/${encodeURIComponent(sid)}/operations/runs/${encodeURIComponent(id)}/artifacts`),
+ },
  vault: {
   operations:(id:string)=>request<{operations:VaultAdminOperation[];supportedEdition:string;namespaces:boolean}>('GET',`/servers/${encodeURIComponent(id)}/vault/admin/operations`),
   admin:(id:string,action:string,input:{token:string;params:Record<string,unknown>;confirmation?:string})=>request<VaultAdminResult>('POST',`/servers/${encodeURIComponent(id)}/vault/admin/${encodeURIComponent(action)}`,input),
@@ -340,7 +355,7 @@ export const api = {
   remove:(id:string)=>request<void>('DELETE',`/servers/${encodeURIComponent(id)}/vault`),
   inspect:(id:string,token:string)=>request<VaultObservation>('POST',`/servers/${encodeURIComponent(id)}/vault/inspect`,{token}),
  },
- features:()=>request<{inventory:boolean;jobSupervision:boolean;vault:boolean}>('GET','/features'),
+ features:()=>request<{inventory:boolean;jobSupervision:boolean;operationSupervision:boolean;vault:boolean}>('GET','/features'),
  inventory:{
  read:(id:string,after='')=>request<{items:Array<{id:string;kind:string;displayName:string;source:string;dataState:string;lastVerifiedAt:string;details:unknown}>;runs:Array<{id:string;status:string;warning:string;startedAt:string}>;changes:unknown[];next:string}>('GET',`/servers/${encodeURIComponent(id)}/inventory?after=${encodeURIComponent(after)}`),
  discover:(id:string)=>request<{status:string;warning:string}>('POST',`/servers/${encodeURIComponent(id)}/inventory/discover`,{}),

@@ -17,7 +17,7 @@ import {Terminal} from '@xterm/xterm'
 import {FitAddon} from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import {api} from '@/lib/api'
-import type {Container} from '@/lib/api'
+import type {Container,ServerOperation} from '@/lib/api'
 import {useServersStore} from '@/stores/servers'
 import {useConfirm} from '@/composables/useConfirm'
 import AppLayout from '@/components/AppLayout.vue'
@@ -30,6 +30,7 @@ import ProxyTab from '@/components/ProxyTab.vue'
 import AppsTab from '@/components/AppsTab.vue'
 import CronTab from '@/components/CronTab.vue'
 import ScheduledTasksTab from '@/components/ScheduledTasksTab.vue'
+import OperationsTab from '@/components/OperationsTab.vue'
 import FirewallTab from '@/components/FirewallTab.vue'
 import DbExecModal from '@/components/DbExecModal.vue'
 
@@ -65,14 +66,17 @@ const tabs = [
   {key: 'apps', label: 'Apps', icon: Package},
   {key: 'cron', label: 'Cron', icon: Clock},
   {key: 'tasks', label: 'Tasks', icon: Timer},
+  {key: 'operations', label: 'Operations', icon: Timer},
   {key: 'firewall', label: 'Firewall', icon: ShieldCheck},
 ] as const
 
-const tabPermissions: Record<string,string[]> = {vault:['integrations.manage','servers.read'],inventory:['inventory.read'],terminal:['servers.terminal','servers.execute'],containers:['docker.read'],compose:['compose.read'],metrics:['metrics.read'],files:['files.list'],proxy:['proxy.read','proxy.manage'],apps:['deployments.read','templates.read'],cron:['jobs.read','logs.read'],tasks:['jobs.read','logs.read'],firewall:['firewall.read','network.read']}
+const tabPermissions: Record<string,string[]> = {operations:['jobs.read'],vault:['integrations.manage','servers.read'],inventory:['inventory.read'],terminal:['servers.terminal','servers.execute'],containers:['docker.read'],compose:['compose.read'],metrics:['metrics.read'],files:['files.list'],proxy:['proxy.read','proxy.manage'],apps:['deployments.read','templates.read'],cron:['jobs.read','logs.read'],tasks:['jobs.read','logs.read'],firewall:['firewall.read','network.read']}
 const inventoryEnabled=ref(false)
 const vaultEnabled=ref(false)
+const operationsEnabled=ref(false)
+const operationSelection=ref('')
 const visibleTabs = tabs.filter(tab => tabPermissions[tab.key]!.every(permission => can(permission,serverId)))
-const activeTab = ref<'vault' | 'inventory' | 'terminal' | 'containers' | 'compose' | 'metrics' | 'files' | 'proxy' | 'apps' | 'cron' | 'tasks' | 'firewall'>(visibleTabs.find(tab=>tab.key!=='inventory' && tab.key!=='vault')?.key ?? 'containers')
+const activeTab = ref<'operations'|'vault' | 'inventory' | 'terminal' | 'containers' | 'compose' | 'metrics' | 'files' | 'proxy' | 'apps' | 'cron' | 'tasks' | 'firewall'>(visibleTabs.find(tab=>tab.key!=='inventory' && tab.key!=='vault')?.key ?? 'containers')
 const server = ref(store.list.find(s => s.id === serverId))
 const tagSaving = ref(false)
 const monitoredContainerIds = ref<Set<string>>(new Set())
@@ -368,6 +372,18 @@ async function fetchContainers() {
   }
 }
 
+async function supervisedOperation(action:ServerOperation,target:{path?:string;cid?:string}) {
+  const id=crypto.randomUUID().replaceAll('-','')
+  operationSelection.value=id
+  composeOutput.value='';composeOutputVisible.value=false
+  try{
+    const response=await api.operations.start(serverId,action,id,target)
+    toast.info(`Operation recorded: ${response.run.state}. Run ${id}`)
+  }catch(cause){
+    toast.error(`${cause instanceof Error?cause.message:'Submission could not be verified'} Request ${id}; inspect history before retrying.`)
+  }finally{if(can('jobs.read',serverId))activeTab.value='operations'}
+}
+
 async function containerAction(cid: string, action: 'start' | 'stop' | 'restart' | 'remove', label: string) {
   if (['stop','restart','remove'].includes(action)) {
     const ok = await confirm({
@@ -379,6 +395,7 @@ async function containerAction(cid: string, action: 'start' | 'stop' | 'restart'
   }
   actionLoading.value[cid] = true
   try {
+    if(operationsEnabled.value){await supervisedOperation(`container-${action}`,{cid});return}
     await api.containers[action](serverId, cid);
     toast.success(`${label} — done`);
     await fetchContainers()
@@ -440,6 +457,7 @@ async function composeUp() {
   if(!await confirm({title:'Apply Compose deployment?',message:`Apply the saved recipe ${composePath.value} on ${server.value?.name || serverId}? Services may be recreated. Unsaved edits are not deployed. Inspect an uncertain prior result before retrying.`,confirmText:'Apply',destructive:true}))return
   composeActing.value = 'up'
   try {
+    if(operationsEnabled.value){await supervisedOperation('compose-up',{path:composePath.value});return}
     const res = await api.compose.up(serverId, composePath.value);
     composeOutput.value = (res as any).output ?? '';
     composeOutputVisible.value = true;
@@ -458,6 +476,7 @@ async function composeDown() {
   if(!await confirm({title:'Stop Compose deployment?',message:`Stop and remove containers for ${composePath.value} on ${server.value?.name || serverId}? Named volumes and recipe files are retained.`,confirmText:'Stop deployment',destructive:true}))return
   composeActing.value = 'down'
   try {
+    if(operationsEnabled.value){await supervisedOperation('compose-down',{path:composePath.value});return}
     const res = await api.compose.down(serverId, composePath.value);
     composeOutput.value = (res as any).output ?? '';
     composeOutputVisible.value = true;
@@ -472,7 +491,7 @@ async function composeDown() {
 }
 
 onMounted(async () => {
-  try{const features=await api.features();inventoryEnabled.value=features.inventory;vaultEnabled.value=features.vault}catch{}
+  try{const features=await api.features();inventoryEnabled.value=features.inventory;vaultEnabled.value=features.vault;operationsEnabled.value=features.operationSupervision===true}catch{}
   if (!server.value) {
     try {
       const s = await api.servers.get(serverId)
@@ -516,6 +535,7 @@ watch(activeTab, tab => {
         </div>
       </div>
 
+      <p v-if="operationSelection&&activeTab!=='operations'" class="text-xs break-all">Last operation request: <code>{{ operationSelection }}</code></p>
       <div class="flex border-b overflow-x-auto scrollbar-none">
         <div v-if="visibleTabs.some(tab => tab.key === 'terminal')" class="flex items-center shrink-0">
           <button :class="['flex items-center gap-1.5 px-3 sm:px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors',
@@ -799,6 +819,9 @@ watch(activeTab, tab => {
       </div>
       <div v-if="activeTab === 'tasks'">
         <ScheduledTasksTab :server-id="serverId"/>
+      </div>
+      <div v-if="activeTab === 'operations'">
+        <OperationsTab :server-id="serverId" :selected-id="operationSelection" :enabled="operationsEnabled" />
       </div>
       <div v-if="activeTab === 'firewall'">
         <FirewallTab :server-id="serverId"/>
