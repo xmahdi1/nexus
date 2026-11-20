@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Plus, Trash2, Loader2, RefreshCw, Play, Clock, CheckCircle2, XCircle } from '@lucide/vue'
 import { api } from '@/lib/api'
-import type { ScheduledTask } from '@/lib/api'
+import type { ScheduledTask, SupervisedRun, RunObservation } from '@/lib/api'
+import { can } from '@/lib/auth'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
 import Label from '@/components/ui/Label.vue'
@@ -38,7 +39,18 @@ const loading = ref(true)
 const saving  = ref(false)
 const showAdd = ref(false)
 const running = ref<Record<string, boolean>>({})
-const form    = ref({ name: '', command: '', intervalMinutes: 60, customInterval: 60 })
+const form    = ref({ name: '', command: '', intervalMinutes: 60, customInterval: 60, supervised: false })
+const supervisionEnabled = ref(false)
+const selectedTask = ref<ScheduledTask | null>(null)
+const runs = ref<SupervisedRun[]>([])
+const observation = ref<RunObservation | null>(null)
+const runBusy = ref(false)
+let alive = true
+const timers: ReturnType<typeof setTimeout>[] = []
+onUnmounted(() => { alive = false; timers.forEach(clearTimeout) })
+watch(() => props.serverId, () => { selectedTask.value = null; observation.value = null; runs.value = []; void load() })
+function allowed(...permissions: string[]) { return permissions.every(permission => can(permission, props.serverId)) }
+function blocked(task: ScheduledTask) { return task.lastStatus === 'running' || (task.supervised && task.lastStatus === 'remote_unknown') }
 
 function fmtInterval(m: number) {
   if (m < 60)   return `Every ${m}m`
@@ -51,13 +63,40 @@ function fmtDate(s: string | null | undefined) {
 }
 
 async function load() {
+  const server = props.serverId
   loading.value = true
-  try   { tasks.value = await api.tasks.list(props.serverId) }
+  try   { const result = await api.tasks.list(server); if (alive && server === props.serverId) tasks.value = result }
   catch { toast.error('Failed to load tasks') }
   finally { loading.value = false }
 }
 
-onMounted(load)
+onMounted(async () => { await Promise.all([load(), api.features().then(features => { supervisionEnabled.value = !!features.jobSupervision }).catch(() => {})]) })
+
+async function loadRuns(task: ScheduledTask) {
+  const server = props.serverId
+  if (selectedTask.value?.id !== task.id) runs.value = []
+  selectedTask.value = task
+  observation.value = null
+  try { const result = await api.tasks.runs(server, task.id); if (alive && server === props.serverId && selectedTask.value?.id === task.id) runs.value = result }
+  catch (error) { toast.error(error instanceof Error ? error.message : 'Could not load run history') }
+}
+async function runAction(run: SupervisedRun, action: 'read' | 'inspect' | 'cancel' | 'release') {
+  const server = props.serverId
+  if (runBusy.value) return
+  if (action === 'cancel' && !await confirm({title: 'Cancel supervised run?', message: 'Stop this run and pause its task schedule? Completed side effects are not rolled back. Work handed off to Docker or other services may continue.', confirmText: 'Cancel run', destructive: true})) return
+  if (action === 'release' && !await confirm({title: 'Remove remote run artifacts?', message: 'Remove this completed run’s private remote files? Its encrypted output remains in Nexus.', confirmText: 'Remove artifacts', destructive: true})) return
+  if (!alive || server !== props.serverId || selectedTask.value?.id !== run.taskId) return
+  runBusy.value = true
+  try {
+    const invoke = {read: api.tasks.readRun, inspect: api.tasks.inspectRun, cancel: api.tasks.cancelRun, release: api.tasks.releaseRun}[action]
+    const result = await invoke(server, run.taskId, run.id)
+    if (alive && server === props.serverId && selectedTask.value?.id === run.taskId) observation.value = result
+    const history = await api.tasks.runs(server, run.taskId)
+    if (alive && server === props.serverId && selectedTask.value?.id === run.taskId) runs.value = history
+    if (alive && server === props.serverId) await load()
+  } catch (error) { toast.error(error instanceof Error ? error.message : 'Run state could not be verified') }
+  finally { runBusy.value = false }
+}
 
 async function addTask() {
   if (!form.value.command) { toast.error('Command is required'); return }
@@ -68,9 +107,10 @@ async function addTask() {
       name:            form.value.name || form.value.command.slice(0, 40),
       command:         form.value.command,
       intervalMinutes: interval,
+      supervised: form.value.supervised,
     })
     toast.success('Task scheduled')
-    form.value    = { name: '', command: '', intervalMinutes: 60, customInterval: 60 }
+    form.value    = { name: '', command: '', intervalMinutes: 60, customInterval: 60, supervised: false }
     showAdd.value = false
     await load()
   } catch (e) { toast.error(e instanceof Error ? e.message : 'Failed') }
@@ -78,6 +118,7 @@ async function addTask() {
 }
 
 async function toggleEnabled(task: ScheduledTask) {
+  if (blocked(task) || !allowed('jobs.manage', 'jobs.execute', 'servers.execute', 'secrets.use')) return
   try { await api.tasks.update(props.serverId, task.id, { enabled: !task.enabled }); await load() }
   catch (e) { toast.error(e instanceof Error ? e.message : 'Failed') }
 }
@@ -87,10 +128,10 @@ async function runNow(task: ScheduledTask) {
   try {
     await api.tasks.runNow(props.serverId, task.id)
     toast.success('Task triggered — will run within 30 seconds')
-    setTimeout(load, 5000)
+    timers.push(setTimeout(load, 5000))
   } catch (e) { toast.error(e instanceof Error ? e.message : 'Failed') }
   finally {
-    setTimeout(() => { delete running.value[task.id]; running.value = { ...running.value } }, 3000)
+    timers.push(setTimeout(() => { delete running.value[task.id]; running.value = { ...running.value } }, 3000))
   }
 }
 
@@ -115,7 +156,7 @@ async function deleteTask(task: ScheduledTask) {
           <Loader2 v-if="loading" class="h-3.5 w-3.5 animate-spin" />
           <RefreshCw v-else class="h-3.5 w-3.5" />Refresh
         </Button>
-        <Button size="sm" class="gap-1.5" @click="showAdd = !showAdd">
+        <Button v-if="allowed('jobs.create','jobs.execute','servers.execute','secrets.use')" size="sm" class="gap-1.5" @click="showAdd = !showAdd">
           <Plus class="h-3.5 w-3.5" />Add task
         </Button>
       </div>
@@ -144,6 +185,13 @@ async function deleteTask(task: ScheduledTask) {
         <Label>Command</Label>
         <Input v-model="form.command" class="font-mono text-sm" placeholder="/usr/bin/backup.sh >> /var/log/backup.log 2>&1" />
       </div>
+      <label v-if="supervisionEnabled" class="flex items-start gap-2 text-sm">
+        <input v-model="form.supervised" type="checkbox" class="mt-1" />
+        <span>Track remotely and allow cancellation
+          <span class="block text-xs text-muted-foreground">Requires root SSH, systemd, cgroup v2 and Python 3. Runs for at most 10 minutes, starting in /. Use cd explicitly when needed. Output is bounded and encrypted.</span>
+          <span class="block text-xs text-muted-foreground">Cancellation controls this service’s processes. Work delegated to Docker or another service may continue.</span>
+        </span>
+      </label>
       <div class="flex flex-col-reverse sm:flex-row gap-2">
         <Button variant="outline" class="sm:w-auto" @click="showAdd = false">Cancel</Button>
         <Button class="gap-2 sm:w-auto" :disabled="saving" @click="addTask">
@@ -167,12 +215,12 @@ async function deleteTask(task: ScheduledTask) {
            class="border rounded-xl p-4 bg-card hover:bg-muted/10 transition-colors">
         <div class="flex items-start gap-3">
 
-          <label class="mt-0.5 cursor-pointer shrink-0" @click.stop="toggleEnabled(task)">
+          <button v-if="allowed('jobs.manage','jobs.execute','servers.execute','secrets.use')" type="button" role="switch" :aria-checked="task.enabled" :aria-label="`Enable task ${task.name}`" :disabled="blocked(task)" class="mt-0.5 shrink-0 disabled:opacity-50" @click.stop="toggleEnabled(task)">
             <div :class="['h-5 w-5 rounded-full border-2 flex items-center justify-center transition-colors',
               task.enabled ? 'bg-primary border-primary' : 'border-muted-foreground/40']">
               <div v-if="task.enabled" class="h-2 w-2 rounded-full bg-white" />
             </div>
-          </label>
+          </button>
 
           <div class="flex-1 min-w-0">
             <div class="flex items-center gap-2 flex-wrap">
@@ -184,6 +232,7 @@ async function deleteTask(task: ScheduledTask) {
                     class="text-[10px] px-2 py-0.5 rounded-full bg-yellow-500/10 text-yellow-600 font-medium">
                 Paused
               </span>
+              <span v-if="task.supervised" class="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-600">Supervised</span>
             </div>
             <p class="text-xs font-mono text-muted-foreground mt-0.5 truncate">{{ task.command }}</p>
             <p class="text-xs text-muted-foreground mt-1">Executes as {{ task.actorId }}</p>
@@ -205,17 +254,43 @@ async function deleteTask(task: ScheduledTask) {
           </div>
 
           <div class="flex items-center gap-1 shrink-0">
-            <Button size="icon" variant="ghost" class="h-7 w-7" :disabled="!!running[task.id] || task.lastStatus === 'running'" @click="runNow(task)">
+            <Button v-if="task.supervised" size="sm" variant="ghost" :aria-label="`Run history for ${task.name}`" @click="loadRuns(task)">Runs</Button>
+            <Button v-if="allowed('jobs.execute','servers.execute','secrets.use')" size="icon" variant="ghost" class="h-7 w-7" :aria-label="`Run ${task.name} now`" :disabled="!!running[task.id] || blocked(task)" @click="runNow(task)">
               <Loader2 v-if="running[task.id]" class="h-3.5 w-3.5 animate-spin" />
               <Play v-else class="h-3.5 w-3.5" />
             </Button>
-            <Button size="icon" variant="ghost" class="h-7 w-7 text-destructive hover:text-destructive" @click="deleteTask(task)">
+            <Button v-if="allowed('jobs.manage')" size="icon" variant="ghost" class="h-7 w-7 text-destructive hover:text-destructive" :aria-label="`Delete task ${task.name}`" :disabled="blocked(task)" @click="deleteTask(task)">
               <Trash2 class="h-3.5 w-3.5" />
             </Button>
           </div>
         </div>
       </div>
     </div>
+
+    <section v-if="selectedTask" class="border rounded-xl p-4 space-y-3" aria-label="Supervised run history">
+      <div class="flex justify-between items-center"><h3 class="text-sm font-medium">Runs for {{ selectedTask.name }}</h3><Button variant="ghost" size="sm" @click="selectedTask = null; observation = null">Close history</Button></div>
+      <p class="text-xs text-muted-foreground">Unknown runs are never replayed automatically. Cancelling does not undo completed side effects.</p>
+      <p v-if="!runs.length" class="text-xs text-muted-foreground">No supervised runs yet.</p>
+      <div v-for="run in runs" :key="run.id" class="border rounded-lg p-3 space-y-2">
+        <p class="text-xs font-mono break-all">{{ run.id }}</p>
+        <p class="text-xs">{{ run.state }} · {{ fmtDate(run.createdAt) }}<span v-if="run.exitCode !== null"> · exit {{ run.exitCode }}</span></p>
+        <p v-if="run.cancelRequestedAt && !run.finishedAt" class="text-xs text-amber-600">Cancellation requested; waiting for verified termination.</p>
+        <p class="text-xs text-muted-foreground">Last verified: {{ fmtDate(run.verifiedAt) }}<span v-if="run.truncated"> · output truncated</span></p>
+        <div class="flex flex-wrap gap-2">
+          <Button v-if="allowed('jobs.read','logs.read','secrets.use')" size="sm" variant="outline" :disabled="runBusy" @click="runAction(run,'read')">View output</Button>
+          <Button v-if="allowed('jobs.read','logs.read','servers.execute','secrets.use')" size="sm" variant="outline" :disabled="runBusy" @click="runAction(run,'inspect')">Inspect remote state</Button>
+          <Button v-if="!run.finishedAt && allowed('jobs.cancel','servers.execute','secrets.use')" size="sm" variant="destructive" :disabled="runBusy" @click="runAction(run,'cancel')">Cancel run</Button>
+          <Button v-if="run.finishedAt && run.verifiedAt && !run.artifactsRemoved && allowed('jobs.manage','logs.read','servers.execute','secrets.use')" size="sm" variant="outline" :disabled="runBusy" @click="runAction(run,'release')">Remove artifacts</Button>
+        </div>
+      </div>
+      <div v-if="observation" class="space-y-2" role="status">
+        <p class="text-sm">Observed: {{ observation.observation.state }} · verified: {{ observation.observation.verified ? 'yes' : 'no' }}</p>
+        <p v-if="!observation.observation.verified && !observation.observation.noDispatch" class="text-xs text-amber-600">State is unverified. Inspect the target before retrying. Automatic retry is disabled.</p>
+        <p v-if="observation.observation.noDispatch" class="text-xs">The command was not dispatched.</p>
+        <p v-if="observation.observation.state === 'interrupted'" class="text-xs text-amber-600">The managed processes stopped without a complete command result. Inspect side effects before starting another run.</p>
+        <pre v-if="observation.observation.output" class="text-xs font-mono bg-muted rounded-lg p-3 max-h-64 overflow-auto whitespace-pre-wrap">{{ observation.observation.output }}</pre>
+      </div>
+    </section>
 
   </div>
 </template>
