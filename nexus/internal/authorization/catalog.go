@@ -105,6 +105,7 @@ func init() {
 	register("GET", "/api/servers/{id}/alerts", "server", "metrics.read")
 	register("PUT", "/api/servers/{id}/alerts", "server", "settings.manage")
 	register("GET", "/api/templates", "global", "templates.read compose.read")
+	register("GET", "/api/templates/custom/{id}", "global", "templates.manage compose.read secrets.use")
 	for _, row := range []string{"POST custom", "PUT custom/{id}", "DELETE custom/{id}"} {
 		p := strings.Fields(row)
 		register(p[0], "/api/templates/"+p[1], "global", "templates.manage")

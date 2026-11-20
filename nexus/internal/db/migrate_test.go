@@ -67,7 +67,7 @@ func TestAdoptLegacyDatabaseAndRestore(t *testing.T) {
 	// All legacy tables, no version ledger, as on a previously running instance.
 	if err := legacy.AutoMigrate(&models.Server{}, &models.ProxyRule{}, &models.Service{},
 		&models.AlertConfig{}, &models.MonitoredContainer{}, &models.ServerAlertConfig{},
-		&migrations.ScheduledTask{}, &models.DeployedApp{}, &models.CustomTemplate{}, &models.LoginEvent{}); err != nil {
+		&migrations.ScheduledTask{}, &migrations.DeployedApp{}, &migrations.CustomTemplate{}, &models.LoginEvent{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := legacy.Exec("PRAGMA journal_mode=WAL").Error; err != nil {
@@ -83,8 +83,8 @@ func TestAdoptLegacyDatabaseAndRestore(t *testing.T) {
 		&models.Service{ID: "bookmark", Name: "Service", URL: "https://example.test"},
 		&migrations.ScheduledTask{ID: "task", ServerID: server.ID, Command: "fixture-only", Enabled: false},
 		&models.ProxyRule{ID: "proxy", ServerID: server.ID, Domain: "example.test", Target: "localhost:80"},
-		&models.DeployedApp{ID: "app", ServerID: server.ID, VarsJSON: `{"fixture":"value"}`},
-		&models.CustomTemplate{ID: "template", Compose: "fixture"},
+		&migrations.DeployedApp{ID: "app", ServerID: server.ID, VarsJSON: `{"fixture":"value"}`},
+		&migrations.CustomTemplate{ID: "template", Compose: "fixture"},
 		&models.MonitoredContainer{ID: "container", ServerID: server.ID, ContainerID: "fixture"},
 		&models.ServerAlertConfig{ID: server.ID, CPUThreshold: 75},
 		&models.LoginEvent{Reason: "fixture", Success: true},
@@ -109,7 +109,7 @@ func TestAdoptLegacyDatabaseAndRestore(t *testing.T) {
 	}
 	var before models.Server
 	legacy.First(&before, "id = ?", server.ID)
-	db, err := Init(path)
+	db, err := Init(path, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +127,9 @@ func TestAdoptLegacyDatabaseAndRestore(t *testing.T) {
 		}
 		for j, old := range originals[i] {
 			for key, value := range old {
+				if key == "vars_json" || (i == 5 && (key == "compose" || key == "post_deploy")) {
+					continue
+				}
 				if !reflect.DeepEqual(value, actual[j][key]) {
 					t.Fatalf("changed legacy column %s for %T", key, row)
 				}
@@ -140,6 +143,18 @@ func TestAdoptLegacyDatabaseAndRestore(t *testing.T) {
 			t.Fatalf("lost %T: count %d err %v", row, count, err)
 		}
 	}
+	var sealed models.DeployedApp
+	if err := db.First(&sealed, "id='app'").Error; err != nil {
+		t.Fatal(err)
+	}
+	recoveredVars, err := nexuscrypto.DecryptDeploymentVariables(key, sealed.ID, sealed.ServerID, sealed.VarsEnc)
+	if err != nil || string(recoveredVars) != `{"fixture":"value"}` {
+		t.Fatal("deployment variables changed", err)
+	}
+	if db.Migrator().HasColumn("deployed_apps", "vars_json") {
+		t.Fatal("plaintext deployment column retained")
+	}
+
 	var cfg models.AlertConfig
 	db.First(&cfg, "id = ?", "default")
 	if cfg.TelegramToken != "fixture-token" || cfg.NotifyServerDown {
@@ -562,5 +577,81 @@ func TestVersionFourAccountAdmissionUpgradeAndRollback(t *testing.T) {
 	}
 	if err := migrate(restored, schemaMigrations[:4], nil); err != nil {
 		t.Fatal("v4 snapshot not readable", err)
+	}
+}
+
+func TestVersionFiveAuditPolicyUpgradeAndRollback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v5.db")
+	old := openFixture(t, path)
+	if err := migrate(old, schemaMigrations[:5], nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Exec(`INSERT INTO server_groups(id,name,created_at)VALUES('prod','Production',CURRENT_TIMESTAMP),('dev','Development',CURRENT_TIMESTAMP)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := Init(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := upgraded.DB()
+	defer c.Close()
+	var protected bool
+	upgraded.Table("server_groups").Where("id='prod'").Pluck("require_mfa", &protected)
+	if !protected {
+		t.Fatal("Production not protected")
+	}
+	upgraded.Table("server_groups").Where("id='dev'").Pluck("require_mfa", &protected)
+	if protected {
+		t.Fatal("Development unexpectedly protected")
+	}
+	if !upgraded.Migrator().HasTable("operation_events") {
+		t.Fatal("missing audit")
+	}
+	backups, _ := filepath.Glob(path + ".pre-migration-*.db")
+	if len(backups) != 1 {
+		t.Fatal("missing snapshot")
+	}
+	restored := openFixture(t, backups[0])
+	if restored.Migrator().HasTable("operation_events") || restored.Migrator().HasColumn("server_groups", "require_mfa") {
+		t.Fatal("snapshot contains new schema")
+	}
+	if err := migrate(restored, schemaMigrations[:5], nil); err != nil {
+		t.Fatal("old ledger unreadable", err)
+	}
+}
+
+func TestVersionSevenInventoryUpgradePreservesAuditAndRollback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v7.db")
+	old := openFixture(t, path)
+	if err := migrate(old, schemaMigrations[:7], nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Exec(`INSERT INTO operation_events(operation_id,at,actor_id,session_id,action,resource_type,resource_id,server_id,source,outcome,request_id)VALUES('preserved',CURRENT_TIMESTAMP,'fixture','','fixture','server','dev','dev','domain','succeeded','')`).Error; err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := Init(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, _ := upgraded.DB()
+	defer conn.Close()
+	var count int64
+	upgraded.Table("operation_events").Where("operation_id='preserved'").Count(&count)
+	if count != 1 {
+		t.Fatal("audit lost")
+	}
+	if !upgraded.Migrator().HasTable("inventory_hosts") || !upgraded.Migrator().HasTable("discovery_runs") {
+		t.Fatal("missing inventory schema")
+	}
+	backups, _ := filepath.Glob(path + ".pre-migration-*.db")
+	if len(backups) != 1 {
+		t.Fatal("missing snapshot")
+	}
+	restored := openFixture(t, backups[0])
+	if restored.Migrator().HasTable("inventory_resources") {
+		t.Fatal("rollback includes v8")
+	}
+	if err := migrate(restored, schemaMigrations[:7], nil); err != nil {
+		t.Fatal("v7 rollback unreadable", err)
 	}
 }

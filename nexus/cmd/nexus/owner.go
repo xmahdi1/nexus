@@ -39,12 +39,14 @@ func runOwnerBootstrap(args []string, readPassword func(string) ([]byte, error),
 		return err
 	}
 	var hash string
+	var encryptionKey []byte
 	if *fromEnv {
 		cfg, err := config.Load()
 		if err != nil {
 			return err
 		}
 		hash = cfg.PasswordHash
+		encryptionKey = cfg.EncryptionKey
 		if *path == "" {
 			*path = cfg.DBPath
 		}
@@ -73,7 +75,7 @@ func runOwnerBootstrap(args []string, readPassword func(string) ([]byte, error),
 	if err := identity.ValidatePasswordHash(hash); err != nil {
 		return err
 	}
-	database, err := db.Init(*path)
+	database, err := db.Init(*path, encryptionKey)
 	if err != nil {
 		return err
 	}

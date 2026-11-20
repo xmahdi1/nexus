@@ -25,6 +25,7 @@ import (
 var mountFrontend = func(r http.Handler, cfg *config.Config) http.Handler { return r }
 
 func main() {
+
 	if len(os.Args) > 1 && os.Args[1] == "account-recovery" {
 		if err := runAccountRecovery(os.Args[2:], os.Stdout); err != nil {
 			log.Fatalf("local account recovery failed: %v", err)
@@ -40,7 +41,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		database, err := db.Init(cfg.DBPath)
+		database, err := db.Init(cfg.DBPath, cfg.EncryptionKey)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -64,21 +65,9 @@ func main() {
 	}
 
 	if len(os.Args) > 1 && os.Args[1] == "db-migrate" {
-		if len(os.Args) != 3 {
-			log.Fatal("usage: nexus db-migrate DATABASE.db")
-		}
-		database, err := db.Init(os.Args[2])
-		if err != nil {
+		if err := runDBMigrate(os.Args[2:], os.Stdout); err != nil {
 			log.Fatalf("migration failed: %v", err)
 		}
-		connection, err := database.DB()
-		if err != nil {
-			log.Fatal(err)
-		}
-		if err := connection.Close(); err != nil {
-			log.Fatal(err)
-		}
-		fmt.Println("Database migrations complete. No workers or HTTP listener started.")
 		return
 	}
 
@@ -103,7 +92,7 @@ func main() {
 		log.Fatalf("config error: %v\n\nRun 'nexus setup' to initialize.", err)
 	}
 
-	database, err := db.Init(cfg.DBPath)
+	database, err := db.Init(cfg.DBPath, cfg.EncryptionKey)
 	if err != nil {
 		log.Fatalf("database: %v", err)
 	}

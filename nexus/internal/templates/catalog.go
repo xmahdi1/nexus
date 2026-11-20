@@ -10,13 +10,14 @@ const (
 )
 
 type TemplateVar struct {
-	Name        string   `json:"name"`
-	Label       string   `json:"label"`
-	Description string   `json:"description,omitempty"`
-	Default     string   `json:"default,omitempty"`
-	Required    bool     `json:"required"`
-	Type        VarType  `json:"type"`
-	Options     []string `json:"options,omitempty"`
+	Name          string   `json:"name"`
+	Label         string   `json:"label"`
+	Description   string   `json:"description,omitempty"`
+	Default       string   `json:"default,omitempty"`
+	StoredDefault bool     `json:"storedDefault,omitempty"`
+	Required      bool     `json:"required"`
+	Type          VarType  `json:"type"`
+	Options       []string `json:"options,omitempty"`
 }
 
 type AppTemplate struct {
@@ -35,6 +36,7 @@ type AppTemplate struct {
 
 func Catalog() []AppTemplate {
 	return []AppTemplate{
+		vaultTemplate(),
 		{
 			ID: "portainer", Name: "Portainer",
 			Icon:        "/app-logos/portainer.png",

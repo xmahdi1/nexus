@@ -25,7 +25,7 @@ func runAccountRecovery(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	database, err := db.Init(cfg.DBPath)
+	database, err := db.Init(cfg.DBPath, cfg.EncryptionKey)
 	if err != nil {
 		return err
 	}

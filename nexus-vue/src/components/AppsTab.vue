@@ -82,6 +82,7 @@ async function load() {
 
 async function runDeploy() {
   if (!selectedTpl.value) return
+  if(!await confirm({title:'Deploy application?',message:`Deploy ${deployName.value} on ${props.serverId}? The template can create services and persistent data. Inspect any prior failed or uncertain deployment before retrying.`,confirmText:'Deploy',destructive:true}))return
   deploying.value    = true
   deployOutput.value = ''
   try {
@@ -105,7 +106,7 @@ async function runDeploy() {
 async function removeApp(app: DeployedApp) {
   const ok = await confirm({
     title:       `Remove ${app.name}`,
-    message:     'This will run docker compose down -v and delete the app directory. Cannot be undone.',
+    message:     'Stop and unregister this app. Named volumes, application files and the Compose recipe are retained for recovery.',
     confirmText: 'Remove', destructive: true,
   })
   if (!ok) return
@@ -122,15 +123,13 @@ function openCustomCreate() {
   showCustom.value = true
 }
 
-function openCustomEdit(tpl: AppTemplate) {
-  editingCustomId.value = tpl.id
-  customForm.value = {
-    name: tpl.name, icon: tpl.icon, category: tpl.category,
-    description: tpl.description, docUrl: tpl.docUrl || '',
-    postDeploy: tpl.postDeploy || '', compose: (tpl as any).compose || '',
-    vars: (tpl.vars || []).map(v => ({ ...v })),
-  }
-  showCustom.value = true
+async function openCustomEdit(tpl: AppTemplate) {
+ try{
+  const source=await api.templates.getCustom(tpl.id)
+  editingCustomId.value=source.id
+  customForm.value={name:source.name,icon:source.icon,category:source.category,description:source.description,docUrl:source.docUrl||'',postDeploy:source.postDeploy||'',compose:source.compose,vars:source.vars.map(v=>({...v}))}
+  showCustom.value=true
+ }catch(e){toast.error(e instanceof Error?e.message:'Protected template unavailable')}
 }
 
 function addVar() {
@@ -144,13 +143,11 @@ async function saveCustom() {
   customSaving.value = true
   try {
     if (editingCustomId.value) {
-      const updated = await api.templates.updateCustom(editingCustomId.value, customForm.value)
-      const idx = templates.value.findIndex(t => t.id === editingCustomId.value)
-      if (idx >= 0) templates.value[idx] = { ...updated, builtIn: false }
+      await api.templates.updateCustom(editingCustomId.value, customForm.value)
     } else {
-      const created = await api.templates.createCustom(customForm.value)
-      templates.value.push({ ...created, builtIn: false, vars: customForm.value.vars })
+      await api.templates.createCustom(customForm.value)
     }
+    templates.value=await api.templates.list()
     showCustom.value = false
     toast.success('Template saved')
   } catch (e) { toast.error(e instanceof Error ? e.message : 'Failed') }
@@ -333,14 +330,14 @@ onUnmounted(() => themeObserver?.disconnect())
           </div>
           <template v-if="selectedTpl.vars?.length">
             <div v-for="v in selectedTpl.vars" :key="v.name" class="space-y-1.5">
-              <Label>{{ v.label }}<span v-if="v.required" class="text-destructive ml-0.5">*</span></Label>
+              <Label>{{ v.label }}<span v-if="v.required && !v.storedDefault" class="text-destructive ml-0.5">*</span></Label>
               <select v-if="v.type === 'select'" v-model="deployVars[v.name]"
                       class="w-full h-9 px-3 rounded-md border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/50">
                 <option v-for="opt in v.options" :key="opt" :value="opt">{{ opt }}</option>
               </select>
               <Input v-else v-model="deployVars[v.name]"
                      :type="v.type === 'password' ? 'password' : v.type === 'number' ? 'number' : 'text'"
-                     :placeholder="v.default || v.label"
+                     :placeholder="v.storedDefault ? 'Stored default (leave blank to use)' : (v.default || v.label)"
                      :class="['text-sm', v.type === 'password' || v.type === 'number' ? 'font-mono' : '']" />
               <p v-if="v.description" class="text-xs text-muted-foreground">{{ v.description }}</p>
             </div>

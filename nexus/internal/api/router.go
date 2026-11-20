@@ -156,6 +156,7 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 
 		r.Get("/api/templates", tplH.List)
 		r.Post("/api/templates/custom", tplH.CreateCustom)
+		r.Get("/api/templates/custom/{id}",tplH.GetCustom)
 		r.Put("/api/templates/custom/{id}", tplH.UpdateCustom)
 		r.Delete("/api/templates/custom/{id}", tplH.DeleteCustom)
 		r.Get("/api/servers/{id}/apps", tplH.ListDeployed)

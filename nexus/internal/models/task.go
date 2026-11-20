@@ -3,6 +3,7 @@ package models
 import "time"
 
 type ScheduledTask struct {
+	Supervised      bool       `json:"supervised"`
 	LeaseUntil      *time.Time `json:"-"`
 	ActorID         string     `json:"actorId"`
 	CreatedBy       string     `json:"createdBy"`
