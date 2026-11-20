@@ -17,6 +17,7 @@ import uuid
 root = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--guest', choices=['debian12', 'ubuntu24'], default='debian12')
+parser.add_argument('--suite', choices=['all','engine','scheduler','operations'], default='all')
 args = parser.parse_args()
 docker = ['docker', '--host', 'unix:///var/run/docker.sock']
 image = 'nexus:disposable-supervision-lab-' + args.guest
@@ -65,7 +66,9 @@ with tempfile.TemporaryDirectory(prefix='nexus-supervision-lab-') as directory:
             raise RuntimeError('Disposable systemd guest SSH did not become ready')
         env = {key: value for key, value in os.environ.items() if not key.startswith('NEXUS_')}
         env.update(NEXUS_SUPERVISION_SSH=address, NEXUS_SUPERVISION_KEY=str(private_key), NEXUS_SUPERVISION_HOST_KEY=public, NEXUS_SUPERVISION_NONCE=nonce)
-        subprocess.run(['go', 'test', '-race', './internal/jobsupervisor', '-run', '^TestDisposableSystemdSupervisor$', '-count=1', '-v'], cwd=root / 'nexus', env=env, check=True, timeout=240)
-        subprocess.run(['go', 'test', '-race', './internal/scheduler', '-run', '^TestSupervisedVM', '-count=1', '-v'], cwd=root / 'nexus', env=env, check=True, timeout=180)
+        suites=[('engine','./internal/jobsupervisor','^TestDisposableSystemdSupervisor$',240),('scheduler','./internal/scheduler','^TestSupervisedVM',180),('operations','./internal/operations','^TestInteractiveVM',120)]
+        for name,package,pattern,timeout in suites:
+            if args.suite in ['all',name]:
+                subprocess.run(['go','test','-race',package,'-run',pattern,'-count=1','-v'],cwd=root/'nexus',env=env,check=True,timeout=timeout)
     finally:
         subprocess.run(docker + ['rm', '-f', container], check=False, stdout=subprocess.DEVNULL)

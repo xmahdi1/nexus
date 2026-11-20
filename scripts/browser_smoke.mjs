@@ -322,6 +322,46 @@ try{
  assert.equal(vaultDeletes,0);assert.equal(vaultInspections,2)
  assert.equal(await viewerPage.getByRole('button',{name:'Vault',exact:true}).count(),0)
  response=await api(viewer,'/servers/dev/vault',undefined,'GET');assert.equal(response.status(),403)
+ // Interactive supervision retains the client-chosen ID across uncertain replies.
+ let interactiveStarts=0,interactiveInspections=0,interactiveCancels=0,interactiveRun
+ await ownerPage.route('**/api/features',route=>route.fulfill({status:200,json:{inventory:true,jobSupervision:true,vault:true,operationSupervision:true}}))
+ await ownerPage.route('**/api/servers/dev/operations/**',route=>{
+  const request=route.request(),path=new URL(request.url()).pathname
+  const snapshot=(output='')=>({run:interactiveRun,observation:{state:interactiveRun.state,verified:interactiveRun.state!=='unknown',empty:!!interactiveRun.finishedAt,exitCode:null,output,truncated:false,released:interactiveRun.artifactsRemoved,detail:'',noDispatch:false},automaticRetryAllowed:false})
+  if(path.endsWith('/compose/up')){
+   interactiveStarts++;const body=request.postDataJSON();assert.match(body.requestId,/^[a-f0-9]{32}$/);assert.equal(body.path,'/root/docker-compose.yml')
+   interactiveRun={id:body.requestId,kind:'operation',action:'compose-up',taskId:'',serverId:'dev',actorId:'fixture',targetId:'b'.repeat(64),state:'unknown',exitCode:null,truncated:false,artifactsRemoved:false,detail:'',createdAt:new Date().toISOString(),dispatchStartedAt:new Date().toISOString(),cancelRequestedAt:null,verifiedAt:null,finishedAt:null}
+   return route.fulfill({status:502,json:{error:'Fixture submission unconfirmed; inspect retained run',code:'remote_unknown',run:interactiveRun}})
+  }
+  if(path.endsWith('/runs'))return route.fulfill({status:200,json:interactiveRun?[interactiveRun]:[]})
+  if(path.endsWith('/inspect')){interactiveInspections++;interactiveRun.state='running';return route.fulfill({status:200,json:snapshot()})}
+  if(path.endsWith('/cancel')){interactiveCancels++;interactiveRun.state='cancelled';interactiveRun.finishedAt=new Date().toISOString();return route.fulfill({status:200,json:snapshot()})}
+  return route.fulfill({status:200,json:snapshot('browser-interactive-private-output')})
+ })
+ const interactiveFeatures=ownerPage.waitForResponse('**/api/features')
+ await ownerPage.goto(url+'/servers/dev');await interactiveFeatures
+ await ownerPage.getByRole('button',{name:'Compose',exact:true}).click()
+ await ownerPage.getByRole('button',{name:'Load',exact:true}).click()
+ await ownerPage.getByRole('button',{name:'up -d',exact:true}).click()
+ await ownerPage.getByText('Apply Compose deployment?',{exact:true}).waitFor()
+ await ownerPage.getByRole('button',{name:'Apply',exact:true}).click()
+ const operationsPanel=ownerPage.getByRole('region',{name:'Supervised operations',exact:true})
+ await operationsPanel.getByRole('heading',{name:'Operation history',exact:true}).waitFor()
+ await operationsPanel.getByText('Submitted run ID: '+interactiveRun.id,{exact:true}).waitFor()
+ await operationsPanel.getByRole('button',{name:'View saved result',exact:true}).click()
+ await operationsPanel.getByText('browser-interactive-private-output',{exact:true}).waitFor()
+ await operationsPanel.getByRole('button',{name:'Hide saved result',exact:true}).click()
+ await operationsPanel.getByRole('button',{name:'Inspect operation',exact:true}).click()
+ await operationsPanel.getByRole('cell',{name:'running',exact:true}).waitFor()
+ await operationsPanel.getByRole('button',{name:'Cancel operation',exact:true}).click()
+ await ownerPage.getByText('Cancel operation?',{exact:true}).waitFor()
+ await ownerPage.getByRole('button',{name:'Cancel operation',exact:true}).last().click()
+ await operationsPanel.getByRole('cell',{name:'cancelled',exact:true}).waitFor()
+ assert.equal(interactiveStarts,1);assert.equal(interactiveInspections,1);assert.equal(interactiveCancels,1)
+ await ownerPage.reload();await ownerPage.getByRole('button',{name:'Operations',exact:true}).click()
+ await operationsPanel.getByRole('cell',{name:'cancelled',exact:true}).waitFor()
+ assert.equal(interactiveStarts,1);assert.equal(await operationsPanel.getByText('browser-interactive-private-output',{exact:true}).count(),0)
+ await ownerPage.unroute('**/api/features')
  response=await api(owner,'/servers/dev/tags',{tags:'fixture-audited-change'},'PATCH');assert.equal(response.status(),200)
  const inspectedOperationId=response.headers()['x-operation-id'];assert.match(inspectedOperationId,/^[a-f0-9]{32}$/)
 
@@ -345,5 +385,5 @@ try{
  await viewerPage.goto(url+'/servers');await viewerPage.waitForURL('**/login')
  await ownerPage.route('**/api/auth/permissions',route=>route.fulfill({status:200,contentType:'text/html',body:'<html>Outer proxy sign in</html>'}))
  await ownerPage.goto(url+'/servers');await ownerPage.waitForURL('**/login',{timeout:10000})
- console.log('Chrome lab passed: real login/invitation, two independent MFA/recovery accounts, scope/denial, disablement, audit viewer, viewer firewall restrictions, cancelled firewall/container/Compose confirmations, failed Compose responses, certificate renewal cancellation/submission/warnings/token clearing, supervised run inspection/cancellation without replay, Vault settings/inventory/token clearing/error/permission boundaries, KV reveal restrictions/CAS/conflicts/uncertain writes without retry, access inspection and raw JSON precision, read-only operation inspection and proxy HTML handling.')
+ console.log('Chrome lab passed: accounts/MFA/scopes, stream and mutation guards, certificate renewal, supervised scheduled/interactive run history/cancellation and reload without replay, Vault access/admin/KV/one-time reveal, audit and proxy HTML handling.')
 }finally{await browser.close()}

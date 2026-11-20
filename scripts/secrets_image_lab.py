@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline schema-8 → schema-12 image upgrade and matching-old-image rollback.
+"""Offline schema-8 → schema-13 image upgrade and matching-old-image rollback.
 Requires local Docker, bcrypt, cryptography, and an already-local schema-8 image.
 Never starts application workers, publishes ports, or reads a deployment .env.
 """
@@ -54,7 +54,7 @@ with tempfile.TemporaryDirectory(prefix='nexus-secret-image-lab-') as directory:
     cli(args.new_image,'db-migrate','--from-env','/data/fixture.db')
     with sqlite3.connect(path) as database:
         assert database.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
-        assert database.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]==12
+        assert database.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]==13
         assert 'vars_json' not in [row[1] for row in database.execute('PRAGMA table_info(deployed_apps)')]
         app=database.execute("SELECT id,server_id,name,status,vars_enc FROM deployed_apps WHERE id='app'").fetchone()
         assert app[2:4]==('preserved','running')
@@ -71,6 +71,12 @@ with tempfile.TemporaryDirectory(prefix='nexus-secret-image-lab-') as directory:
         job_nonce=os.urandom(12)
         job_cipher='v1:'+base64.b64encode(job_nonce+AESGCM(key).encrypt(job_nonce,job_output.encode(),job_aad)).decode()
         database.execute("INSERT INTO supervised_runs(id,task_id,server_id,actor_id,command_hash,state,output_enc,exit_code,created_at,finished_at)VALUES('job','fixture-task','fixture',? ,?,'exited',?,0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",(owner[0],'0'*64,job_cipher))
+        operation_id='a'*32
+        operation_output=os.urandom(20).hex()
+        operation_aad=b'nexus:job-output:v1\0'+operation_id.encode()+b'\0fixture'
+        operation_nonce=os.urandom(12)
+        operation_cipher='v1:'+base64.b64encode(operation_nonce+AESGCM(key).encrypt(operation_nonce,operation_output.encode(),operation_aad)).decode()
+        database.execute("INSERT INTO supervised_runs(id,task_id,server_id,actor_id,command_hash,state,output_enc,created_at,finished_at,kind,action,source_session_id,target_hash)VALUES(?,'','fixture',?,?,'exited',?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'operation','compose-up','expired-fixture-session',?)",(operation_id,owner[0],'1'*64,operation_cipher,'2'*64))
     wrong=dict(env,NEXUS_ENCRYPTION_KEY=base64.b64encode(os.urandom(32)).decode())
     assert cli(args.new_image,'db-migrate','--from-env','/data/fixture.db',extra_env=wrong,check=False).returncode!=0,'wrong-key reopen accepted'
     assert cli(args.old_image,'db-migrate','/data/fixture.db',check=False).returncode!=0,'old binary accepted new schema'
@@ -104,5 +110,9 @@ with tempfile.TemporaryDirectory(prefix='nexus-secret-image-lab-') as directory:
         assert database.execute("SELECT port,tls_name,ca_pem,namespace FROM vault_connections WHERE server_id='fixture'").fetchone()==(8200,'vault.fixture','','')
         job_sealed=base64.b64decode(database.execute("SELECT output_enc FROM supervised_runs WHERE id='job'").fetchone()[0][3:])
         assert AESGCM(new_key).decrypt(job_sealed[:12],job_sealed[12:],job_aad).decode()==job_output
+        operation=database.execute("SELECT kind,action,source_session_id,target_hash,output_enc FROM supervised_runs WHERE id=?",(operation_id,)).fetchone()
+        assert operation[:4]==('operation','compose-up','expired-fixture-session','2'*64)
+        sealed=base64.b64decode(operation[4][3:])
+        assert AESGCM(new_key).decrypt(sealed[:12],sealed[12:],operation_aad).decode()==operation_output
     cli(args.new_image,'db-migrate','--from-env','/data/fixture.db')
     print('Offline image upgrade, rotation and recovery checks passed.')
