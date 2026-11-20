@@ -21,7 +21,7 @@ func NewDockerHandler(db *gorm.DB, encKey []byte, pool *nexusssh.Pool) *DockerHa
 	return &DockerHandler{db: db, encKey: encKey, pool: pool}
 }
 
-func (h *DockerHandler) dockerClient(w http.ResponseWriter, serverID string) (*docker.Client, bool) {
+func (h *DockerHandler) dockerClient(w http.ResponseWriter, r *http.Request, serverID string) (*docker.Client, bool) {
 	var server models.Server
 	if err := h.db.First(&server, "id = ?", serverID).Error; err != nil {
 		writeErr(w, "server not found", "not_found", http.StatusNotFound)
@@ -32,7 +32,7 @@ func (h *DockerHandler) dockerClient(w http.ResponseWriter, serverID string) (*d
 		writeErr(w, "key decrypt failed", "internal", http.StatusInternalServerError)
 		return nil, false
 	}
-	sshClient, err := h.pool.Get(nexusssh.ServerConfig{
+	sshClient, err := h.pool.GetContext(r.Context(), nexusssh.ServerConfig{
 		ID:      server.ID,
 		Host:    server.Host,
 		Port:    server.Port,
@@ -43,11 +43,11 @@ func (h *DockerHandler) dockerClient(w http.ResponseWriter, serverID string) (*d
 		writeErr(w, "ssh: "+err.Error(), "connection_failed", http.StatusBadGateway)
 		return nil, false
 	}
-	return docker.NewClient(sshClient), true
+	return docker.NewClientContext(r.Context(), sshClient), true
 }
 
 func (h *DockerHandler) ListContainers(w http.ResponseWriter, r *http.Request) {
-	client, ok := h.dockerClient(w, chi.URLParam(r, "id"))
+	client, ok := h.dockerClient(w, r, chi.URLParam(r, "id"))
 	if !ok {
 		return
 	}
@@ -80,7 +80,7 @@ func (h *DockerHandler) containerAction(
 	r *http.Request,
 	fn func(*docker.Client, string) error,
 ) {
-	client, ok := h.dockerClient(w, chi.URLParam(r, "id"))
+	client, ok := h.dockerClient(w, r, chi.URLParam(r, "id"))
 	if !ok {
 		return
 	}
