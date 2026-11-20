@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"github.com/xmahdi1/nexus/internal/audit"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -47,7 +48,7 @@ func (h *ComposeHandler) Read(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := pool.Get(nexusssh.ServerConfig{
+	client, err := pool.GetContext(r.Context(), nexusssh.ServerConfig{
 		ID: server.ID, Host: server.Host, Port: server.Port,
 		User: server.Username, PrivKey: privKey,
 	})
@@ -56,7 +57,7 @@ func (h *ComposeHandler) Read(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	content, err := compose.ReadFile(client, path)
+	content, err := compose.ReadFile(r.Context(), client, path)
 	if err != nil {
 		writeErr(w, err.Error(), "read_failed", http.StatusBadGateway)
 		return
@@ -83,7 +84,7 @@ func (h *ComposeHandler) Write(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := pool.Get(nexusssh.ServerConfig{
+	client, err := pool.GetContext(r.Context(), nexusssh.ServerConfig{
 		ID: server.ID, Host: server.Host, Port: server.Port,
 		User: server.Username, PrivKey: privKey,
 	})
@@ -92,7 +93,7 @@ func (h *ComposeHandler) Write(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := compose.WriteFile(client, path, body.Content); err != nil {
+	if err := compose.WriteFile(r.Context(), client, path, body.Content); err != nil {
 		writeErr(w, err.Error(), "write_failed", http.StatusBadGateway)
 		return
 	}
@@ -101,21 +102,21 @@ func (h *ComposeHandler) Write(w http.ResponseWriter, r *http.Request) {
 
 func (h *ComposeHandler) Up(w http.ResponseWriter, r *http.Request) {
 	h.composeAction(w, r, func(c *nexusssh.Pool, s *models.Server, pk []byte, path string) (string, error) {
-		client, err := c.Get(nexusssh.ServerConfig{ID: s.ID, Host: s.Host, Port: s.Port, User: s.Username, PrivKey: pk})
+		client, err := c.GetContext(r.Context(), nexusssh.ServerConfig{ID: s.ID, Host: s.Host, Port: s.Port, User: s.Username, PrivKey: pk})
 		if err != nil {
 			return "", err
 		}
-		return compose.Up(client, path)
+		return compose.Up(r.Context(), client, path)
 	})
 }
 
 func (h *ComposeHandler) Down(w http.ResponseWriter, r *http.Request) {
 	h.composeAction(w, r, func(c *nexusssh.Pool, s *models.Server, pk []byte, path string) (string, error) {
-		client, err := c.Get(nexusssh.ServerConfig{ID: s.ID, Host: s.Host, Port: s.Port, User: s.Username, PrivKey: pk})
+		client, err := c.GetContext(r.Context(), nexusssh.ServerConfig{ID: s.ID, Host: s.Host, Port: s.Port, User: s.Username, PrivKey: pk})
 		if err != nil {
 			return "", err
 		}
-		return compose.Down(client, path)
+		return compose.Down(r.Context(), client, path)
 	})
 }
 
@@ -135,6 +136,7 @@ func (h *ComposeHandler) composeAction(
 
 	output, err := fn(pool, server, privKey, path)
 	if err != nil {
+		audit.MarkFailed(r.Context())
 		writeJSON(w, map[string]any{"ok": false, "output": output, "error": err.Error()}, http.StatusOK)
 		return
 	}

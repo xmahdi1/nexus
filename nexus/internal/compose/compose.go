@@ -1,11 +1,13 @@
 package compose
 
 import (
-	"encoding/base64"
+	"context"
+	"crypto/sha256"
 	"fmt"
 	"path/filepath"
 	"strings"
 
+	nexusssh "github.com/xmahdi1/nexus/internal/ssh"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -15,57 +17,38 @@ func shellescape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-func ReadFile(client *ssh.Client, path string) (string, error) {
-	sess, err := client.NewSession()
-	if err != nil {
-		return "", fmt.Errorf("new session: %w", err)
-	}
-	defer sess.Close()
-
-	out, err := sess.Output("cat " + shellescape(path))
-	if err != nil {
-		return "", fmt.Errorf("cannot read %s: %w", path, err)
-	}
-	return string(out), nil
+func ReadFile(ctx context.Context, client *ssh.Client, path string) (string, error) {
+	return nexusssh.Run(ctx, client, "cat -- "+shellescape(path), nil, nexusssh.CommandTimeout)
 }
 
-func WriteFile(client *ssh.Client, path, content string) error {
-	sess, err := client.NewSession()
-	if err != nil {
-		return fmt.Errorf("new session: %w", err)
+func WriteFile(ctx context.Context, client *ssh.Client, path, content string) error {
+	if len(content) > nexusssh.CommandOutputLimit {
+		return fmt.Errorf("compose file exceeds 1 MiB")
 	}
-	defer sess.Close()
-
-	encoded := base64.StdEncoding.EncodeToString([]byte(content))
-	cmd := fmt.Sprintf("echo %s | base64 -d > %s", shellescape(encoded), shellescape(path))
-	if err := sess.Run(cmd); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	return nil
+	// Transport recipe contents over stdin rather than placing secrets in argv.
+	_, err := nexusssh.Run(ctx, client, writeCommand(path, content), strings.NewReader(content), nexusssh.CommandTimeout)
+	return err
 }
 
-func Up(client *ssh.Client, path string) (string, error) {
-	return execInDir(client, path, dockerPath+" compose up -d 2>&1")
+func Up(ctx context.Context, client *ssh.Client, path string) (string, error) {
+	return execInDir(ctx, client, path, "up -d")
 }
 
-func Down(client *ssh.Client, path string) (string, error) {
-	return execInDir(client, path, dockerPath+" compose down 2>&1")
+func Down(ctx context.Context, client *ssh.Client, path string) (string, error) {
+	return execInDir(ctx, client, path, "down")
 }
 
-func execInDir(client *ssh.Client, filePath, cmd string) (string, error) {
-	sess, err := client.NewSession()
-	if err != nil {
-		return "", fmt.Errorf("new session: %w", err)
-	}
-	defer sess.Close()
+func actionCommand(filePath, action string) string {
+	return fmt.Sprintf("cd %s && %s compose -f %s %s 2>&1", shellescape(filepath.Dir(filePath)), dockerPath, shellescape(filepath.Base(filePath)), action)
+}
+func execInDir(ctx context.Context, client *ssh.Client, filePath, action string) (string, error) {
+	out, err := nexusssh.Run(ctx, client, actionCommand(filePath, action), nil, nexusssh.CommandTimeout)
+	return strings.TrimSpace(out), err
+}
 
-	out, err := sess.Output(fmt.Sprintf("cd %s && %s", shellescape(filepath.Dir(filePath)), cmd))
-	output := strings.TrimSpace(string(out))
-	if err != nil {
-		if output != "" {
-			return output, fmt.Errorf("%s", output)
-		}
-		return "", err
-	}
-	return output, nil
+func writeCommand(path, content string) string {
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+	// Verify completeness before atomically replacing a recipe. A disconnected
+	// stdin must not publish a truncated file or overwrite the previous recipe.
+	return "umask 077; target=" + shellescape(path) + `; tmp=$(mktemp -- "${target}.nexus.XXXXXXXX") || exit 1; trap 'rm -f -- "$tmp"' EXIT HUP INT TERM; cat > "$tmp" && actual=$(sha256sum -- "$tmp") && [ "${actual%% *}" = ` + shellescape(digest) + ` ] && chmod 600 -- "$tmp" && mv -f -- "$tmp" "$target"`
 }
