@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/xmahdi1/nexus/internal/audit"
 	"net/http"
 	"time"
 
@@ -59,6 +60,7 @@ func (h *ServicesHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err.Error(), "internal", http.StatusInternalServerError)
 		return
 	}
+	audit.MarkResource(r.Context(), "service", svc.ID)
 	writeJSON(w, svc, http.StatusCreated)
 }
 
@@ -82,7 +84,7 @@ func (h *ServicesHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "invalid body", "bad_request", http.StatusBadRequest)
 		return
 	}
-	h.db.Model(&svc).Updates(map[string]any{
+	if err := h.db.Model(&svc).Updates(map[string]any{
 		"name":        body.Name,
 		"url":         body.URL,
 		"icon":        body.Icon,
@@ -90,12 +92,18 @@ func (h *ServicesHandler) Update(w http.ResponseWriter, r *http.Request) {
 		"category":    body.Category,
 		"color":       body.Color,
 		"sort_order":  body.SortOrder,
-	})
+	}).Error; err != nil {
+		writeErr(w, "Could not update service.", "storage_unavailable", 503)
+		return
+	}
 	h.db.First(&svc, "id = ?", id)
 	writeJSON(w, svc, http.StatusOK)
 }
 
 func (h *ServicesHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	h.db.Delete(&models.Service{}, "id = ?", chi.URLParam(r, "id"))
+	if err := h.db.Delete(&models.Service{}, "id = ?", chi.URLParam(r, "id")).Error; err != nil {
+		writeErr(w, "Could not delete service.", "storage_unavailable", 503)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
