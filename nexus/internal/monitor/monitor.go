@@ -1,7 +1,10 @@
 package monitor
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"golang.org/x/crypto/ssh"
 	"net"
 	"strconv"
 	"strings"
@@ -233,18 +236,8 @@ func (m *Monitor) checkResources(server models.Server) {
 	if err != nil {
 		return
 	}
-	sess, err := client.NewSession()
-	if err != nil {
-		m.pool.Remove(server.ID)
-		return
-	}
-	defer sess.Close()
-	defer authorization.New(m.db).Watch(authorization.MonitorPrincipal, server.ID, func() { sess.Close() }, "metrics.read", "secrets.use")()
-	if !authorization.New(m.db).All(authorization.MonitorPrincipal, server.ID, "metrics.read", "secrets.use") {
-		return
-	}
 
-	out, err := sess.Output(`
+	out, err := m.command(client, server.ID, "metrics.read", `
 read -r _ u1 n1 s1 i1 io1 irq1 sirq1 _ < /proc/stat
 sleep 1
 read -r _ u2 n2 s2 i2 io2 irq2 sirq2 _ < /proc/stat
@@ -339,20 +332,14 @@ func (m *Monitor) SeedContainer(serverID, containerID, name string) {
 	if err != nil {
 		return
 	}
-	sess, err := client.NewSession()
+
+	out, err := m.command(client, server.ID, "docker.read", fmt.Sprintf(
+		"docker inspect --format='{{.State.Status}}' -- %s 2>/dev/null", "'"+strings.ReplaceAll(containerID, "'", "'\"'\"'")+"'",
+	))
 	if err != nil {
-		m.pool.Remove(serverID)
-		return
-	}
-	defer sess.Close()
-	defer authorization.New(m.db).Watch(authorization.MonitorPrincipal, server.ID, func() { sess.Close() }, "docker.read", "secrets.use")()
-	if !authorization.New(m.db).All(authorization.MonitorPrincipal, server.ID, "docker.read", "secrets.use") {
 		return
 	}
 
-	out, _ := sess.Output(fmt.Sprintf(
-		"docker inspect --format='{{.State.Status}}' -- %s 2>/dev/null", "'"+strings.ReplaceAll(containerID, "'", "'\"'\"'")+"'",
-	))
 	state := strings.TrimSpace(string(out))
 	if state == "" || name == "" {
 		return
@@ -387,18 +374,12 @@ func (m *Monitor) checkContainers(serverID string, monitored []models.MonitoredC
 	if err != nil {
 		return
 	}
-	sess, err := client.NewSession()
-	if err != nil {
-		m.pool.Remove(serverID)
-		return
-	}
-	defer sess.Close()
-	defer authorization.New(m.db).Watch(authorization.MonitorPrincipal, server.ID, func() { sess.Close() }, "docker.read", "secrets.use")()
-	if !authorization.New(m.db).All(authorization.MonitorPrincipal, server.ID, "docker.read", "secrets.use") {
-		return
-	}
 
-	out, _ := sess.Output(`docker ps -a --format '{{.Names}}|{{.State}}' 2>/dev/null`)
+	out, err := m.command(client, server.ID, "docker.read", `docker ps -a --format '{{.Names}}|{{.State}}' 2>/dev/null`)
+
+	if err != nil {
+		return
+	}
 
 	currentStates := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -448,4 +429,22 @@ func fmtDuration(d time.Duration) string {
 		return fmt.Sprintf("%dh %dm", h, min)
 	}
 	return fmt.Sprintf("%dm", min)
+}
+
+func (m *Monitor) command(client *ssh.Client, serverID, permission, command string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	policy := authorization.New(m.db)
+	defer policy.Watch(authorization.MonitorPrincipal, serverID, cancel, permission, "secrets.use")()
+	if !policy.All(authorization.MonitorPrincipal, serverID, permission, "secrets.use") {
+		return "", errors.New("monitor access revoked")
+	}
+	out, err := nexusssh.Run(ctx, client, command, nil, 30*time.Second)
+	if err != nil {
+		return "", err
+	}
+	if !policy.All(authorization.MonitorPrincipal, serverID, permission, "secrets.use") {
+		return "", errors.New("monitor access revoked")
+	}
+	return out, nil
 }

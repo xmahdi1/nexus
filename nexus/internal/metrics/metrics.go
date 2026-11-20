@@ -102,7 +102,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "key decrypt failed", http.StatusInternalServerError)
 		return
 	}
-	sshClient, err := h.pool.Get(nexusssh.ServerConfig{
+	sshClient, err := h.pool.GetContext(r.Context(), nexusssh.ServerConfig{
 		ID: server.ID, Host: server.Host, Port: server.Port,
 		User: server.Username, PrivKey: privKey,
 	})
@@ -110,17 +110,9 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "ssh: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	sess, err := sshClient.NewSession()
+	out, err := nexusssh.Run(r.Context(), sshClient, strings.TrimSpace(metricsScript), nil, 15*time.Second)
 	if err != nil {
-		h.pool.Remove(server.ID)
-		writeErr(w, "session: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer sess.Close()
-
-	out, err := sess.Output(strings.TrimSpace(metricsScript))
-	if err != nil && len(out) == 0 {
-		writeErr(w, "metrics collection failed: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, "metrics collection failed", http.StatusBadGateway)
 		return
 	}
 

@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -40,12 +41,15 @@ func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 	conn.SetReadLimit(64 << 10)
-	defer nexusauth.WatchAccess(r, func() { conn.Close() })()
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	defer nexusauth.WatchAccess(r, func() { cancel(); conn.Close() })()
 
 	gone := make(chan struct{})
 	go func() {
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
+				cancel()
 				close(gone)
 				return
 			}
@@ -58,7 +62,7 @@ func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return false
 		}
-		sshClient, err := h.pool.Get(nexusssh.ServerConfig{
+		sshClient, err := h.pool.GetContext(ctx, nexusssh.ServerConfig{
 			ID: server.ID, Host: server.Host, Port: server.Port,
 			User: server.Username, PrivKey: privKey,
 		})
@@ -66,28 +70,15 @@ func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 			conn.WriteJSON(map[string]string{"error": err.Error()})
 			return true
 		}
-		sess, err := sshClient.NewSession()
+		out, err := nexusssh.Run(ctx, sshClient, metricsScript, nil, 15*time.Second)
 		if err != nil {
-			h.pool.Remove(server.ID)
-			conn.WriteJSON(map[string]string{"error": "session failed"})
-			return true
-		}
-		defer sess.Close()
-		workDone := make(chan struct{})
-		go func() {
-			select {
-			case <-gone:
-				sess.Close()
-			case <-workDone:
+			if ctx.Err() != nil {
+				return false
 			}
-		}()
-		defer close(workDone)
-
-		out, err := sess.Output(metricsScript)
-		if err != nil && len(out) == 0 {
 			conn.WriteJSON(map[string]string{"error": "collection failed"})
 			return true
 		}
+
 		data, _ := json.Marshal(parse(string(out), server.ID))
 		return conn.WriteMessage(websocket.TextMessage, data) == nil
 	}
