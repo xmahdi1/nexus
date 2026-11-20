@@ -33,6 +33,7 @@ const sslCFToken  = ref('')
 const sslLoading  = ref(false)
 const sslOutput   = ref('')
 const sslDone     = ref(false)
+const sslWarning = ref('')
 
 function isIP(s: string) { return /^\d+\.\d+\.\d+\.\d+$/.test(s) }
 
@@ -74,6 +75,8 @@ async function saveRule() {
   if (!form.value.domain || !form.value.target || !form.value.proxyType) {
     formError.value = 'Domain, target and proxy type are required'; return
   }
+  if(editingId.value&&!await confirm({title:'Change proxy route?',message:`Change ${form.value.domain} to ${form.value.target} on ${props.serverId}? This may interrupt requests through the existing route.`,confirmText:'Update route',destructive:true}))return
+
   saving.value = true
   try {
     if (editingId.value) {
@@ -81,12 +84,14 @@ async function saveRule() {
           { domain: form.value.domain, target: form.value.target, proxyType: form.value.proxyType, ssl: form.value.ssl })
       const idx = rules.value.findIndex(r => r.id === editingId.value)
       if (idx >= 0) rules.value[idx] = updated
-      toast.success('Rule updated')
+      if(form.value.ssl && !updated.sslEnabled)toast.warning('Route updated, but certificate setup failed. Inspect the route before retrying certificate issuance.')
+      else toast.success('Rule updated')
     } else {
       const rule = await api.proxy.create(props.serverId,
           { domain: form.value.domain, target: form.value.target, proxyType: form.value.proxyType, ssl: form.value.ssl })
       rules.value.unshift(rule)
-      toast.success(`${rule.domain} created`)
+      if(form.value.ssl && !rule.sslEnabled)toast.warning(`${rule.domain} created, but certificate setup failed. Inspect the route before retrying.`)
+      else toast.success(`${rule.domain} created`)
     }
     closeForm()
   } catch (e) { formError.value = e instanceof Error ? e.message : 'Failed' }
@@ -115,27 +120,32 @@ function openSSL(rule: ProxyRule) {
   sslCFToken.value = ''
   sslOutput.value  = ''
   sslDone.value    = false
+  sslWarning.value = ''
 }
 
-function closeSSL() { sslRule.value = null; sslOutput.value = ''; sslDone.value = false }
+function closeSSL() { sslRule.value = null; sslOutput.value = ''; sslDone.value = false; sslCFToken.value = ''; sslWarning.value = '' }
 
 async function submitSSL() {
   if (!sslRule.value) return
   if (sslWild.value && !sslCFToken.value) { toast.error('Cloudflare API token required for wildcard'); return }
-  sslLoading.value = true; sslOutput.value = ''; sslDone.value = false
+  if (sslRule.value.sslEnabled && !await confirm({ title: 'Renew certificate?', message: 'This requests a new certificate and counts toward the certificate authority’s rate limits.', confirmText: 'Renew' })) return
+  if (!sslRule.value) return
+  sslLoading.value = true; sslOutput.value = ''; sslDone.value = false; sslWarning.value = ''
   try {
     const res = await api.proxy.enableSSL(props.serverId, sslRule.value.id,
-        { email: sslEmail.value, wildcard: sslWild.value, cfToken: sslCFToken.value })
+        { email: sslEmail.value, wildcard: sslWild.value, cfToken: sslCFToken.value, renew: sslRule.value.sslEnabled })
     const idx = rules.value.findIndex(r => r.id === res.rule.id)
     if (idx >= 0) rules.value[idx] = res.rule
     sslOutput.value = res.output || ''
     sslDone.value   = true
+    sslWarning.value = res.warning || ''
     toast.success('SSL certificate issued')
+    if (res.warning) toast.warning(res.warning, { duration: 15000 })
   } catch (e: any) {
     sslOutput.value = e?.output || (e instanceof Error ? e.message : 'Certbot failed')
     toast.error('SSL failed — check output below')
     sslDone.value = true
-  } finally { sslLoading.value = false }
+  } finally { sslLoading.value = false; sslCFToken.value = '' }
 }
 
 onMounted(async () => {
@@ -259,9 +269,9 @@ onMounted(async () => {
           </td>
           <td class="px-4 py-3">
             <div class="flex items-center justify-end gap-1">
-              <Button v-if="!rule.sslEnabled" size="sm" variant="ghost"
+              <Button v-if="!rule.sslEnabled || rule.proxyType === 'nginx'" size="sm" variant="ghost"
                       class="h-7 gap-1.5 text-xs text-green-600 hover:text-green-600" @click="openSSL(rule)">
-                <ShieldCheck class="h-3.5 w-3.5" />SSL
+                <ShieldCheck class="h-3.5 w-3.5" />{{ rule.sslEnabled ? 'Renew' : 'SSL' }}
               </Button>
               <Button size="icon" variant="ghost" class="h-7 w-7" @click="openEdit(rule)">
                 <Pencil class="h-3.5 w-3.5" />
@@ -289,15 +299,15 @@ onMounted(async () => {
             <ShieldCheck class="h-5 w-5" />
           </div>
           <div>
-            <p class="font-semibold text-sm">Enable SSL for {{ sslRule.domain }}</p>
-            <p class="text-xs text-muted-foreground mt-0.5">Free certificate via Let's Encrypt + Certbot</p>
+            <p class="font-semibold text-sm">{{ sslRule.sslEnabled ? 'Renew' : 'Enable' }} SSL for {{ sslRule.domain }}</p>
+            <p class="text-xs text-muted-foreground mt-0.5">Certificate via the configured ACME authority and Certbot</p>
           </div>
         </div>
 
         <template v-if="!sslDone">
           <div class="bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-3 py-2 flex items-start gap-2 text-xs text-yellow-700 dark:text-yellow-400">
             <AlertTriangle class="h-3.5 w-3.5 shrink-0 mt-0.5" />
-            Make sure DNS points to this server and port 80 is open before continuing.
+            {{ sslWild ? 'Use a scoped DNS token for the certificate’s domains. DNS changes must propagate before validation.' : 'Make sure DNS points to this server and port 80 is open. For an existing DNS certificate, select wildcard and supply a fresh token below.' }}
           </div>
           <div class="space-y-1.5">
             <Label>Email for Let's Encrypt notifications</Label>
@@ -317,6 +327,10 @@ onMounted(async () => {
               <p class="text-xs text-muted-foreground">
                 Create at dash.cloudflare.com → My Profile → API Tokens → Create Token
               </p>
+              <p class="text-xs text-amber-600 dark:text-amber-400">
+                Automatic renewal is not configured. The token is removed after issuance.
+                Use Renew with a fresh token before expiry, or configure renewal on the server.
+              </p>
             </div>
           </div>
           <div class="flex flex-col-reverse sm:flex-row gap-2">
@@ -324,11 +338,12 @@ onMounted(async () => {
             <Button class="gap-2 flex-1" :disabled="sslLoading" @click="submitSSL">
               <Loader2 v-if="sslLoading" class="h-4 w-4 animate-spin" />
               <ShieldCheck v-else class="h-4 w-4" />
-              Issue certificate
+              {{ sslRule.sslEnabled ? 'Renew certificate' : 'Issue certificate' }}
             </Button>
           </div>
         </template>
 
+        <p v-if="sslWarning" role="alert" class="text-xs text-amber-600 dark:text-amber-400">{{ sslWarning }}</p>
         <div v-if="sslOutput" class="space-y-2">
           <div class="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
             <Terminal class="h-3.5 w-3.5" />Certbot output
