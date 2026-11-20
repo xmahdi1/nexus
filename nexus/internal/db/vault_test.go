@@ -9,8 +9,8 @@ import (
 
 func TestVaultConnectionUpgradeBacksUpSchema11AndPreservesJobs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vault-upgrade.db")
-	database, err := Init(path)
-	if err != nil {
+	database := openFixture(t, path)
+	if err := migrate(database, schemaMigrations[:11], nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.Create(&models.Server{ID: "host", Name: "Preserved", Host: "192.0.2.1", Username: "fixture"}).Error; err != nil {
@@ -22,12 +22,9 @@ func TestVaultConnectionUpgradeBacksUpSchema11AndPreservesJobs(t *testing.T) {
 	if err := database.Model(&models.ScheduledTask{}).Where("id=?", "task").Update("enabled", false).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := database.Exec("DROP TRIGGER vault_connection_remove;DROP TABLE vault_connections;DELETE FROM schema_migrations WHERE version=12").Error; err != nil {
-		t.Fatal(err)
-	}
 	connection, _ := database.DB()
 	connection.Close()
-	database, err = Init(path)
+	database, err := Init(path)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,6 +3,10 @@ package models
 import "time"
 
 type SupervisedRun struct {
+	Kind              string     `gorm:"default:scheduled" json:"kind"`
+	Action            string     `json:"action,omitempty"`
+	SourceSessionID   string     `json:"-"`
+	TargetHash        string     `json:"targetId,omitempty"`
 	ID                string     `gorm:"primaryKey" json:"id"`
 	TaskID            string     `json:"taskId"`
 	ServerID          string     `json:"serverId"`
