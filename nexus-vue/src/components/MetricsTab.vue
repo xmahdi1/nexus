@@ -3,7 +3,8 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Clock, Cpu, MemoryStick, HardDrive, ArrowDown, ArrowUp, Activity, Server, Bell, Loader2 } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import { api } from '@/lib/api'
-import { verifySession } from '@/lib/auth'
+import {managedSocket} from '@/lib/socket'
+import { can, verifySession } from '@/lib/auth'
 import type { Metrics, ServerAlertConfig } from '@/lib/api'
 import SparkLine from './SparkLine.vue'
 import Button from '@/components/ui/Button.vue'
@@ -75,18 +76,12 @@ async function saveAlerts() {
   }
 }
 
-let ws: WebSocket | null = null
 let disposed = false
-let retries = 0
-let reconnectTimer: ReturnType<typeof setTimeout> | undefined
-
-async function connect() {
-  if (disposed || !await verifySession()) { error.value = 'Session expired. Sign in again.'; return }
-  if (disposed) return
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  ws = new WebSocket(`${proto}://${location.host}/ws/metrics/${props.serverId}`)
-
-  ws.onmessage = (e) => {
+const stream=managedSocket({
+ authorize:async()=>await verifySession() && can('metrics.read',props.serverId) && can('secrets.use',props.serverId),
+ url:()=>api.ws.metrics(props.serverId),maxRetries:6,
+ status:state=>{if(['denied','closed','error'].includes(state))error.value=state==='denied'?'Session or permission expired. Sign in again.':'Connection closed. Reload to reconnect.'},
+ message:e=>{try{
     const m: Metrics = JSON.parse(e.data)
     if ((m as any).error) { error.value = (m as any).error; return }
     error.value = ''
@@ -102,13 +97,10 @@ async function connect() {
     animateTo(dTx,   m.netTxRate,  500)
     history.value.push({ t: Date.now(), cpu: m.cpu, mem: memPct, rx: m.netRxRate, tx: m.netTxRate, load: m.load1 })
     if (history.value.length > MAX) history.value.shift()
-  }
-  ws.onerror  = () => { error.value = 'Connection error' }
-  ws.onclose = () => {
-    if (disposed || retries >= 6) { if (!disposed) error.value = 'Connection closed. Reload to reconnect.'; return }
-    reconnectTimer = setTimeout(connect, Math.min(1000 * 2 ** retries++, 30_000))
-  }
-}
+
+ }catch{error.value='Invalid metrics response'}},
+})
+function connect(){if(!disposed)void stream.connect()}
 
 onMounted(async () => {
   try {
@@ -126,7 +118,7 @@ onMounted(async () => {
   connect()
 })
 
-onUnmounted(() => { disposed = true; clearTimeout(reconnectTimer); ws?.close(); ws = null })
+onUnmounted(() => { disposed = true; stream.dispose() })
 </script>
 
 <template>
