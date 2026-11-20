@@ -13,10 +13,11 @@ import (
 )
 
 type Config struct {
-	ACME                  ACMEConfig
-	InventoryEnabled      bool
-	VaultEnabled          bool
-	JobSupervisionEnabled bool
+	ACME                        ACMEConfig
+	InventoryEnabled            bool
+	VaultEnabled                bool
+	JobSupervisionEnabled       bool
+	OperationSupervisionEnabled bool
 
 	authMu             sync.RWMutex
 	SessionIdleTTL     time.Duration
@@ -75,11 +76,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	return &Config{
-		ACME:                  acme,
-		VaultEnabled:          os.Getenv("NEXUS_ENABLE_VAULT") == "true",
-		InventoryEnabled:      os.Getenv("NEXUS_ENABLE_INVENTORY") == "true",
-		JobSupervisionEnabled: os.Getenv("NEXUS_ENABLE_JOB_SUPERVISION") == "true",
-		SessionIdleTTL:        idle, SessionAbsoluteTTL: absolute,
+		ACME:                        acme,
+		VaultEnabled:                os.Getenv("NEXUS_ENABLE_VAULT") == "true",
+		InventoryEnabled:            os.Getenv("NEXUS_ENABLE_INVENTORY") == "true",
+		JobSupervisionEnabled:       os.Getenv("NEXUS_ENABLE_JOB_SUPERVISION") == "true",
+		OperationSupervisionEnabled: os.Getenv("NEXUS_ENABLE_OPERATION_SUPERVISION") == "true",
+		SessionIdleTTL:              idle, SessionAbsoluteTTL: absolute,
 		PasswordHash:  hash,
 		EncryptionKey: key,
 		Port:          port,

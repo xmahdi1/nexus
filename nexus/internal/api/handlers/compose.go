@@ -14,13 +14,18 @@ import (
 )
 
 type ComposeHandler struct {
-	db     *gorm.DB
-	encKey []byte
-	pool   *nexusssh.Pool
+	supervised bool
+	db         *gorm.DB
+	encKey     []byte
+	pool       *nexusssh.Pool
 }
 
-func NewComposeHandler(db *gorm.DB, encKey []byte, pool *nexusssh.Pool) *ComposeHandler {
-	return &ComposeHandler{db: db, encKey: encKey, pool: pool}
+func NewComposeHandler(db *gorm.DB, encKey []byte, pool *nexusssh.Pool, supervised ...bool) *ComposeHandler {
+	h := &ComposeHandler{db: db, encKey: encKey, pool: pool}
+	if len(supervised) > 0 {
+		h.supervised = supervised[0]
+	}
+	return h
 }
 
 func (h *ComposeHandler) sshClient(w http.ResponseWriter, serverID string) (*nexusssh.Pool, *models.Server, []byte, bool) {
@@ -101,6 +106,10 @@ func (h *ComposeHandler) Write(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ComposeHandler) Up(w http.ResponseWriter, r *http.Request) {
+	if h.supervised {
+		writeErr(w, "Use supervised operation controls with a request ID.", "supervised_operation_required", 409)
+		return
+	}
 	h.composeAction(w, r, func(c *nexusssh.Pool, s *models.Server, pk []byte, path string) (string, error) {
 		client, err := c.GetContext(r.Context(), nexusssh.ServerConfig{ID: s.ID, Host: s.Host, Port: s.Port, User: s.Username, PrivKey: pk})
 		if err != nil {
@@ -111,6 +120,10 @@ func (h *ComposeHandler) Up(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ComposeHandler) Down(w http.ResponseWriter, r *http.Request) {
+	if h.supervised {
+		writeErr(w, "Use supervised operation controls with a request ID.", "supervised_operation_required", 409)
+		return
+	}
 	h.composeAction(w, r, func(c *nexusssh.Pool, s *models.Server, pk []byte, path string) (string, error) {
 		client, err := c.GetContext(r.Context(), nexusssh.ServerConfig{ID: s.ID, Host: s.Host, Port: s.Port, User: s.Username, PrivKey: pk})
 		if err != nil {

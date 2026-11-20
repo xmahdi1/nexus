@@ -18,7 +18,9 @@ import (
 	"github.com/xmahdi1/nexus/internal/httpx"
 	"github.com/xmahdi1/nexus/internal/metrics"
 	"github.com/xmahdi1/nexus/internal/monitor"
+	"github.com/xmahdi1/nexus/internal/operations"
 	"github.com/xmahdi1/nexus/internal/proxy"
+	"github.com/xmahdi1/nexus/internal/remoteaction"
 	nexusssh "github.com/xmahdi1/nexus/internal/ssh"
 	"github.com/xmahdi1/nexus/internal/static"
 	"github.com/xmahdi1/nexus/internal/templates"
@@ -47,8 +49,8 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 	accountsH := handlers.NewAccountHandler(db, cfg)
 	serversH := handlers.NewServersHandler(db, cfg.EncryptionKey, pool, mon)
 	metricsH := metrics.NewHandler(db, cfg.EncryptionKey, pool)
-	dockerH := handlers.NewDockerHandler(db, cfg.EncryptionKey, pool)
-	composeH := handlers.NewComposeHandler(db, cfg.EncryptionKey, pool)
+	dockerH := handlers.NewDockerHandler(db, cfg.EncryptionKey, pool, cfg.OperationSupervisionEnabled)
+	composeH := handlers.NewComposeHandler(db, cfg.EncryptionKey, pool, cfg.OperationSupervisionEnabled)
 	filesH := filemanager.NewHandler(db, cfg.EncryptionKey, pool)
 	termH := terminal.NewHandler(db, cfg.EncryptionKey, pool, cfg.EncryptionKey)
 	logsH := docker.NewLogsHandler(db, cfg.EncryptionKey, pool, cfg.EncryptionKey)
@@ -60,6 +62,7 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 	execH := handlers.NewExecHandler(db, cfg.EncryptionKey, pool)
 	tasksH := handlers.NewTasksHandler(db, cfg.JobSupervisionEnabled)
 	runsH := handlers.NewSupervisedRunsHandler(db, cfg.EncryptionKey, pool)
+	operationsH := handlers.NewOperationsHandler(operations.New(db, cfg.EncryptionKey, pool, auth.NewService(db, cfg), cfg.OperationSupervisionEnabled))
 	fwH := handlers.NewFirewallHandler(db, []byte(cfg.EncryptionKey), pool)
 
 	r.With(nexusMW.LoginRateLimit).Post("/api/auth/login", authH.Login)
@@ -85,8 +88,16 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 		r.Get("/api/auth/me", authH.Me)
 		r.Get("/api/features", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]bool{"inventory": cfg.InventoryEnabled, "jobSupervision": cfg.JobSupervisionEnabled, "vault": cfg.VaultEnabled})
+			json.NewEncoder(w).Encode(map[string]bool{"inventory": cfg.InventoryEnabled, "jobSupervision": cfg.JobSupervisionEnabled, "operationSupervision": cfg.OperationSupervisionEnabled, "vault": cfg.VaultEnabled})
 		})
+		for _, action := range remoteaction.Catalog() {
+			r.Post("/api/servers/{id}/operations/"+action.Route, operationsH.Start(action.ID))
+		}
+		r.Get("/api/servers/{id}/operations/runs", operationsH.List)
+		r.Get("/api/servers/{id}/operations/runs/{rid}", operationsH.Read)
+		r.Post("/api/servers/{id}/operations/runs/{rid}/inspect", operationsH.Inspect)
+		r.Post("/api/servers/{id}/operations/runs/{rid}/cancel", operationsH.Cancel)
+		r.Delete("/api/servers/{id}/operations/runs/{rid}/artifacts", operationsH.Release)
 		vaultH := handlers.NewVaultHandler(db, cfg.EncryptionKey, pool, cfg.VaultEnabled)
 		r.Get("/api/servers/{id}/vault", vaultH.Read)
 		r.Put("/api/servers/{id}/vault", vaultH.Save)

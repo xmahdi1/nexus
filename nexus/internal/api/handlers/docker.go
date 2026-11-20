@@ -12,13 +12,18 @@ import (
 )
 
 type DockerHandler struct {
-	db     *gorm.DB
-	encKey []byte
-	pool   *nexusssh.Pool
+	supervised bool
+	db         *gorm.DB
+	encKey     []byte
+	pool       *nexusssh.Pool
 }
 
-func NewDockerHandler(db *gorm.DB, encKey []byte, pool *nexusssh.Pool) *DockerHandler {
-	return &DockerHandler{db: db, encKey: encKey, pool: pool}
+func NewDockerHandler(db *gorm.DB, encKey []byte, pool *nexusssh.Pool, supervised ...bool) *DockerHandler {
+	h := &DockerHandler{db: db, encKey: encKey, pool: pool}
+	if len(supervised) > 0 {
+		h.supervised = supervised[0]
+	}
+	return h
 }
 
 func (h *DockerHandler) dockerClient(w http.ResponseWriter, r *http.Request, serverID string) (*docker.Client, bool) {
@@ -80,6 +85,10 @@ func (h *DockerHandler) containerAction(
 	r *http.Request,
 	fn func(*docker.Client, string) error,
 ) {
+	if h.supervised {
+		writeErr(w, "Use supervised operation controls with a request ID.", "supervised_operation_required", 409)
+		return
+	}
 	client, ok := h.dockerClient(w, r, chi.URLParam(r, "id"))
 	if !ok {
 		return

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"github.com/xmahdi1/nexus/internal/config"
 	"github.com/xmahdi1/nexus/internal/db"
 	"github.com/xmahdi1/nexus/internal/monitor"
+	"github.com/xmahdi1/nexus/internal/operations"
 	"github.com/xmahdi1/nexus/internal/scheduler"
 	nexusssh "github.com/xmahdi1/nexus/internal/ssh"
 	"github.com/xmahdi1/nexus/internal/static"
@@ -117,6 +119,7 @@ func main() {
 
 	sched := scheduler.New(database, []byte(cfg.EncryptionKey), pool, cfg.JobSupervisionEnabled)
 	sched.Start()
+	operations.New(database, cfg.EncryptionKey, pool, auth.NewService(database, cfg), cfg.OperationSupervisionEnabled).Run(context.Background())
 
 	router := api.NewRouter(database, cfg, pool, mon)
 	handler := mountFrontend(router, cfg)

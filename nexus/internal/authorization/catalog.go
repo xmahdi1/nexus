@@ -1,6 +1,7 @@
 package authorization
 
 import (
+	"github.com/xmahdi1/nexus/internal/remoteaction"
 	"github.com/xmahdi1/nexus/internal/vault"
 	"strings"
 )
@@ -50,6 +51,14 @@ func self(method, path string) {
 }
 func init() {
 	self("GET", "/api/features")
+	for _, action := range remoteaction.Catalog() {
+		register("POST", "/api/servers/{id}/operations/"+action.Route, "server", strings.Join(action.Permissions, " "))
+	}
+	register("GET", "/api/servers/{id}/operations/runs", "server", "jobs.read")
+	register("GET", "/api/servers/{id}/operations/runs/{rid}", "server", "jobs.read logs.read secrets.use")
+	register("POST", "/api/servers/{id}/operations/runs/{rid}/inspect", "server", "jobs.read logs.read servers.execute secrets.use")
+	register("POST", "/api/servers/{id}/operations/runs/{rid}/cancel", "server", "jobs.cancel servers.execute secrets.use")
+	register("DELETE", "/api/servers/{id}/operations/runs/{rid}/artifacts", "server", "jobs.manage logs.read servers.execute secrets.use")
 	for _, method := range []string{"GET", "PUT", "DELETE"} {
 		register(method, "/api/servers/{id}/vault", "server", "integrations.manage servers.read")
 	}
