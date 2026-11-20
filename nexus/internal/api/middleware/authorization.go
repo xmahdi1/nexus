@@ -1,8 +1,10 @@
 package middleware
 
 import (
+	"errors"
 	"github.com/xmahdi1/nexus/internal/auth"
 	"github.com/xmahdi1/nexus/internal/authorization"
+	"gorm.io/gorm"
 	"net/http"
 	"strings"
 )
@@ -37,6 +39,32 @@ func Authorize(service *authorization.Service) func(http.Handler) http.Handler {
 				authError(w, status, "permission_denied", "Access denied.")
 				return
 			}
+			// High-risk operations in protected groups require a recently verified factor.
+			protected, err := service.Protected(server)
+			if err != nil {
+				authError(w, 503, "policy_unavailable", "Risk policy unavailable.")
+				return
+			}
+			groupChange := params["gid"] != "" && r.Method != "GET"
+			if groupChange {
+				var group authorization.Group
+				err := service.DB.First(&group, "id=?", params["gid"]).Error
+				if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+					authError(w, 503, "policy_unavailable", "Risk policy unavailable.")
+					return
+				}
+				if err == nil && group.RequireMFA {
+					protected = true
+				}
+			}
+			if (protected && (authorization.Risk(policy) != "low" || groupChange)) && !access.RecentMFA() {
+				if err := service.Record(access.User.ID, policy.Method+" "+policy.Path, server, "step_up_required", w.Header().Get("X-Request-ID")); err != nil {
+					authError(w, 503, "audit_unavailable", "Audit unavailable.")
+					return
+				}
+				authError(w, 403, "step_up_required", "Verify MFA in Security settings before this protected operation.")
+				return
+			}
 			// Audit access decisions before remote side effects; fail closed if recording
 			// fails. These are authorization decisions, not claims of operation success.
 			if !policy.Self {
@@ -45,8 +73,16 @@ func Authorize(service *authorization.Service) func(http.Handler) http.Handler {
 					return
 				}
 			}
-			access.CheckAuthorization = func() bool { return service.Allowed(access.User.ID, policy, server) }
-			next.ServeHTTP(w, authorization.Bind(r, service, access.User.ID))
+			access.CheckAuthorization = func() bool {
+				protected, err := service.Protected(server)
+				return err == nil && (!protected || authorization.Risk(policy) == "low" || access.RecentMFA()) && service.Allowed(access.User.ID, policy, server)
+			}
+			bound := authorization.Bind(r, service, access.User.ID)
+			if audited(policy) {
+				serveAudited(service.DB, w, bound, next, operationEvent(r, access, policy, params))
+				return
+			}
+			next.ServeHTTP(w, bound)
 		})
 	}
 }
