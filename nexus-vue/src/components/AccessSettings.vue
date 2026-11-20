@@ -7,7 +7,7 @@ import Label from './ui/Label.vue'
 
 type Role = {id: string; name: string; permissions: string[]}
 type Grant = {id: string; principalId: string; principalKind: string; roleId: string; scopeType: string; scopeId: string; createdBy: string}
-type Group = {id: string; name: string; serverIds: string[]}
+type Group = {id: string; name: string; serverIds: string[];requireMfa:boolean}
 const available = ref(false)
 const loading = ref(false)
 const error = ref('')
@@ -56,7 +56,7 @@ onMounted(load)
       <h3 class="font-medium">Roles and server groups</h3>
       <Button variant="outline" size="sm" :disabled="loading" @click="load">Refresh</Button>
     </div>
-    <p class="text-xs text-muted-foreground">Additional-user login is not available yet. These grants define access for existing identities. Host control permits broad commands and file access. The upgrade's compatibility grants are listed below.</p>
+    <p class="text-xs text-muted-foreground">Invite accounts above and grant access to their stable principal IDs. Host control permits broad commands and file access. The upgrade's compatibility grants are listed below.</p>
     <p v-if="error" class="text-sm text-destructive" role="alert">{{ error }}</p>
     <template v-if="available">
       <div class="space-y-1.5">
@@ -71,6 +71,8 @@ onMounted(load)
       <div v-for="group in groups" :key="group.id" class="border rounded-md p-3 space-y-2">
         <div class="flex justify-between gap-2"><p class="font-medium text-sm">{{ group.name }}</p>
           <Button variant="outline" size="sm" :disabled="loading" @click="change(() => api.access.deleteGroup(group.id, password))">Delete group</Button></div>
+        <p class="text-xs">Protected operations: {{group.requireMfa ? 'MFA verified within five minutes required' : 'Standard authorization'}}</p>
+        <Button variant="outline" size="sm" :disabled="loading" @click="change(() => api.access.groupPolicy(group.id,!group.requireMfa,password))">{{group.requireMfa ? 'Disable MFA requirement' : 'Require recent MFA'}}</Button>
         <div v-for="id in group.serverIds" :key="id" class="flex justify-between items-center gap-2 text-sm">
           <span>{{ servers.find(s => s.id === id)?.name ?? id }}</span>
           <Button variant="outline" size="sm" :disabled="loading" @click="change(() => api.access.membership(group.id, id, true, password))">Remove member</Button>
