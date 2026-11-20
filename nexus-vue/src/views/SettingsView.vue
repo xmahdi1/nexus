@@ -11,6 +11,7 @@ import {api} from '@/lib/api'
 import {applyTheme, getTheme, type Theme} from '@/lib/theme'
 import AppLayout from '@/components/AppLayout.vue'
 import AccessSettings from '@/components/AccessSettings.vue'
+import AuditSettings from '@/components/AuditSettings.vue'
 import UserSettings from '@/components/UserSettings.vue'
 import RecoveryCodes from '@/components/RecoveryCodes.vue'
 import {can} from '@/lib/auth'
@@ -57,6 +58,8 @@ async function logoutAll() {
 onMounted(loadSessions)
 
 
+const stepUpPassword=ref(''),stepUpCode=ref('')
+async function stepUp(){try{await api.auth.stepUp(stepUpPassword.value,stepUpCode.value);stepUpPassword.value='';stepUpCode.value='';toast.success('MFA verified for five minutes on this device.')}catch(e){toast.error(e instanceof Error?e.message:'Verification failed')}}
 const mfaEnabled = ref(false)
 const recoveryCodes = ref<string[]>([])
 const recoveryRemaining = ref(0)
@@ -331,8 +334,10 @@ onUnmounted(() => observer?.disconnect())
 
           <section id="security" class="bg-card border rounded-xl p-5 sm:p-6 space-y-4 scroll-mt-4">
             <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Security</h2>
+            <div v-if="mfaEnabled" class="border rounded-lg p-4 space-y-2"><h3 class="font-medium">Verify a protected operation</h3><p class="text-xs">Confirm your current password and a fresh authenticator or unused recovery code. Verification lasts five minutes on this device; return to the intended target afterwards.</p><Input v-model="stepUpPassword" type="password" autocomplete="current-password" placeholder="Current password"/><Input v-model="stepUpCode" autocomplete="one-time-code" maxlength="40" placeholder="Authenticator or recovery code"/><Button @click="stepUp">Verify MFA</Button></div>
             <UserSettings/>
             <AccessSettings/>
+            <AuditSettings/>
             <div v-if="recoveryCodes.length" class="space-y-3"><RecoveryCodes :codes="recoveryCodes"/><a href="/login" class="underline">I saved my codes — sign in again</a></div>
             <div class="border rounded-lg p-4 space-y-3">
               <div class="flex items-center justify-between gap-2">
