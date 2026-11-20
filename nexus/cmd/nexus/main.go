@@ -25,6 +25,12 @@ import (
 var mountFrontend = func(r http.Handler, cfg *config.Config) http.Handler { return r }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "key-rotate" {
+		if err := runKeyRotate(os.Args[2:], os.Stdout); err != nil {
+			log.Fatalf("key rotation failed: %v", err)
+		}
+		return
+	}
 
 	if len(os.Args) > 1 && os.Args[1] == "account-recovery" {
 		if err := runAccountRecovery(os.Args[2:], os.Stdout); err != nil {
