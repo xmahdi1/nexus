@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/xmahdi1/nexus/internal/audit"
 	"net/http"
 	"strings"
 	"time"
@@ -16,9 +17,18 @@ import (
 	"gorm.io/gorm"
 )
 
-type TasksHandler struct{ db *gorm.DB }
+type TasksHandler struct {
+	db                 *gorm.DB
+	supervisionEnabled bool
+}
 
-func NewTasksHandler(db *gorm.DB) *TasksHandler { return &TasksHandler{db} }
+func NewTasksHandler(db *gorm.DB, enabled ...bool) *TasksHandler {
+	h := &TasksHandler{db: db}
+	if len(enabled) > 0 {
+		h.supervisionEnabled = enabled[0]
+	}
+	return h
+}
 func (h *TasksHandler) List(w http.ResponseWriter, r *http.Request) {
 	tasks := []models.ScheduledTask{}
 	if err := h.db.Where("server_id=?", chi.URLParam(r, "id")).Order("created_at desc").Find(&tasks).Error; err != nil {
@@ -32,6 +42,7 @@ type taskInput struct {
 	Name, Command   string
 	IntervalMinutes int
 	Enabled         *bool
+	Supervised      *bool
 }
 
 func validTask(input taskInput) bool {
@@ -46,6 +57,10 @@ func (h *TasksHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if input.IntervalMinutes == 0 {
 		input.IntervalMinutes = 60
 	}
+	if input.Supervised != nil && *input.Supervised && !h.supervisionEnabled {
+		writeErr(w, "Job supervision is disabled.", "feature_disabled", 409)
+		return
+	}
 	id := make([]byte, 16)
 	if _, err := rand.Read(id); err != nil {
 		writeErr(w, "Could not create task.", "internal", 500)
@@ -55,10 +70,14 @@ func (h *TasksHandler) Create(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	next := now.Add(time.Duration(input.IntervalMinutes) * time.Minute)
 	task := models.ScheduledTask{ID: hex.EncodeToString(id), ServerID: chi.URLParam(r, "id"), ActorID: access.User.ID, CreatedBy: access.User.ID, Name: input.Name, Command: input.Command, IntervalMinutes: input.IntervalMinutes, Enabled: true, NextRunAt: &next, LastStatus: "pending", CreatedAt: now}
+	if input.Supervised != nil {
+		task.Supervised = *input.Supervised
+	}
 	if err := h.db.Create(&task).Error; err != nil {
 		writeErr(w, "Could not save task.", "internal", 500)
 		return
 	}
+	audit.MarkResource(r.Context(), "task", task.ID)
 	writeJSON(w, task, 201)
 }
 func (h *TasksHandler) Update(w http.ResponseWriter, r *http.Request) {
@@ -67,16 +86,23 @@ func (h *TasksHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "Invalid task input.", "bad_request", 400)
 		return
 	}
+	if input.Supervised != nil && *input.Supervised && !h.supervisionEnabled {
+		writeErr(w, "Job supervision is disabled.", "feature_disabled", 409)
+		return
+	}
 	access, _ := auth.FromContext(r.Context())
 	var task models.ScheduledTask
 	err := h.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.First(&task, "id=? AND server_id=?", chi.URLParam(r, "tid"), chi.URLParam(r, "id")).Error; err != nil {
 			return err
 		}
-		if task.LastStatus == "running" {
+		if taskBlocked(task) {
 			return errTaskRunning
 		}
 		updates := map[string]any{"actor_id": access.User.ID}
+		if input.Supervised != nil {
+			updates["supervised"] = *input.Supervised
+		}
 		if input.Name != "" {
 			updates["name"] = input.Name
 		}
@@ -109,7 +135,7 @@ func (h *TasksHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		if err := tx.First(&task, "id=? AND server_id=?", chi.URLParam(r, "tid"), chi.URLParam(r, "id")).Error; err != nil {
 			return err
 		}
-		if task.LastStatus == "running" {
+		if taskBlocked(task) {
 			return errTaskRunning
 		}
 		return tx.Delete(&task).Error
@@ -126,8 +152,11 @@ func (h *TasksHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 		if err := tx.First(&task, "id=? AND server_id=?", chi.URLParam(r, "tid"), chi.URLParam(r, "id")).Error; err != nil {
 			return err
 		}
-		if task.LastStatus == "running" {
+		if taskBlocked(task) {
 			return errTaskRunning
+		}
+		if task.Supervised && !h.supervisionEnabled {
+			return errSupervisionDisabled
 		}
 		past := time.Now().UTC().Add(-time.Second)
 		return tx.Model(&task).Updates(map[string]any{"actor_id": access.User.ID, "enabled": true, "next_run_at": past, "last_status": "pending"}).Error
@@ -139,6 +168,11 @@ func (h *TasksHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 }
 
 var errTaskRunning = fmt.Errorf("task is running")
+var errSupervisionDisabled = fmt.Errorf("job supervision is disabled")
+
+func taskBlocked(task models.ScheduledTask) bool {
+	return task.LastStatus == "running" || (task.Supervised && task.RunID != "")
+}
 
 func (h *TasksHandler) taskFailure(w http.ResponseWriter, err error) bool {
 	if err == nil {
@@ -147,7 +181,9 @@ func (h *TasksHandler) taskFailure(w http.ResponseWriter, err error) bool {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		writeErr(w, "Task not found.", "not_found", 404)
 	} else if errors.Is(err, errTaskRunning) {
-		writeErr(w, "Task is running; wait for completion or authorization cancellation.", "task_running", 409)
+		writeErr(w, "Task has a running or unresolved execution; inspect or cancel it before retrying.", "task_running", 409)
+	} else if errors.Is(err, errSupervisionDisabled) {
+		writeErr(w, "Job supervision is disabled.", "feature_disabled", 409)
 	} else {
 		writeErr(w, "Could not save task.", "internal", 500)
 	}
