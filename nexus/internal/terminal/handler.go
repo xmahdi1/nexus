@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -43,13 +44,8 @@ func NewHandler(db *gorm.DB, encKey []byte, pool *nexusssh.Pool, secret []byte) 
 	return &Handler{db: db, encKey: encKey, pool: pool, secret: secret}
 }
 
-func ensureHistoryAppend(client *ssh.Client) {
-	sess, err := client.NewSession()
-	if err != nil {
-		return
-	}
-	defer sess.Close()
-	sess.Run(`grep -qF "history -a" ~/.bashrc 2>/dev/null || echo 'export PROMPT_COMMAND="history -a;${PROMPT_COMMAND}"' >> ~/.bashrc`)
+func ensureHistoryAppend(ctx context.Context, client *ssh.Client) {
+	nexusssh.Run(ctx, client, `grep -qF "history -a" ~/.bashrc 2>/dev/null || echo 'export PROMPT_COMMAND="history -a;${PROMPT_COMMAND}"' >> ~/.bashrc`, nil, 5*time.Second)
 }
 
 func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +53,12 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	defer nexusauth.WatchAccess(r, cancel)()
+	setup, setupCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer setupCancel()
 
 	var server models.Server
 	if err := h.db.First(&server, "id = ?", chi.URLParam(r, "id")).Error; err != nil {
@@ -70,7 +72,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sshClient, err := h.pool.Get(nexusssh.ServerConfig{
+	sshClient, err := h.pool.GetContext(setup, nexusssh.ServerConfig{
 		ID:      server.ID,
 		Host:    server.Host,
 		Port:    server.Port,
@@ -82,20 +84,24 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ensureHistoryAppend(sshClient)
+	ensureHistoryAppend(setup, sshClient)
 
-	sess, err := sshClient.NewSession()
+	sess, err := nexusssh.OpenSession(setup, sshClient)
 	if err != nil {
 		h.pool.Remove(server.ID)
 		http.Error(w, "session: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer sess.Close()
+	stopSession := context.AfterFunc(ctx, func() { sess.Close() })
+	defer stopSession()
 
-	if err := sess.RequestPty("xterm-256color", 24, 80, ssh.TerminalModes{
-		ssh.ECHO:          1,
-		ssh.TTY_OP_ISPEED: 38400,
-		ssh.TTY_OP_OSPEED: 38400,
+	if err := nexusssh.SessionRequest(setup, sess, func() error {
+		return sess.RequestPty("xterm-256color", 24, 80, ssh.TerminalModes{
+			ssh.ECHO:          1,
+			ssh.TTY_OP_ISPEED: 38400,
+			ssh.TTY_OP_OSPEED: 38400,
+		})
 	}); err != nil {
 		http.Error(w, "pty: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -117,7 +123,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := sess.Shell(); err != nil {
+	if err := nexusssh.SessionRequest(setup, sess, sess.Shell); err != nil {
 		http.Error(w, "shell: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -129,7 +135,8 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 	conn.SetReadLimit(64 << 10)
-	defer nexusauth.WatchAccess(r, func() { conn.Close(); sess.Close() })()
+	stopConnection := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stopConnection()
 
 	var mu sync.Mutex
 	write := func(data []byte) {
