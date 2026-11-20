@@ -31,12 +31,23 @@ import (
 
 // A loopback SSH fixture only emits canned output. It never executes the
 // supplied collection command or accesses a Docker daemon/real managed host.
-func TestMetricsWebSocketClosesAfterHTTPLogout(t *testing.T)           { testMetricsWebSocket(t, false) }
-func TestMetricsWebSocketClosesAfterGroupScopeRevocation(t *testing.T) { testMetricsWebSocket(t, true) }
-func TestMetricsWebSocketClosesAfterInvitedAccountDisablement(t *testing.T) {
-	testMetricsWebSocket(t, false, true)
+func TestMetricsWebSocketClosesAfterHTTPLogout(t *testing.T) {
+	testSessionWebSocket(t, "logout", "metrics")
 }
-func testMetricsWebSocket(t *testing.T, scopeRevocation bool, disable ...bool) {
+func TestMetricsWebSocketClosesAfterGroupScopeRevocation(t *testing.T) {
+	testSessionWebSocket(t, "scope", "metrics")
+}
+func TestMetricsWebSocketClosesAfterInvitedAccountDisablement(t *testing.T) {
+	testSessionWebSocket(t, "disable", "metrics")
+}
+func TestStreamExpiryAndRoleRevocation(t *testing.T) {
+	for _, stream := range []string{"metrics", "logs"} {
+		for _, cause := range []string{"absolute_expiry", "idle_expiry", "role_revoked", "scope", "logout", "disable"} {
+			t.Run(stream+"/"+cause, func(t *testing.T) { testSessionWebSocket(t, cause, stream) })
+		}
+	}
+}
+func testSessionWebSocket(t *testing.T, cause, stream string) {
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -85,6 +96,18 @@ func testMetricsWebSocket(t *testing.T, scopeRevocation bool, disable ...bool) {
 						continue
 					}
 					req.Reply(true, nil)
+					var payload struct{ Command string }
+					if ssh.Unmarshal(req.Payload, &payload) != nil {
+						return
+					}
+					if strings.Contains(payload.Command, " logs ") {
+						for {
+							if _, err := fmt.Fprintln(channel, "fixture log output"); err != nil {
+								return
+							}
+							time.Sleep(100 * time.Millisecond)
+						}
+					}
 					fmt.Fprintln(channel, "fixture metrics output")
 					channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
 					return
@@ -138,7 +161,7 @@ func testMetricsWebSocket(t *testing.T, scopeRevocation bool, disable ...bool) {
 	}
 	var administrator *auth.Access
 	service := auth.NewService(database, cfg)
-	if len(disable) > 0 && disable[0] {
+	if cause == "disable" {
 		if _, err := identity.BootstrapOwner(database, identity.BootstrapOptions{Username: "owner", PasswordHash: cfg.PasswordHash}); err != nil {
 			t.Fatal(err)
 		}
@@ -168,12 +191,31 @@ func testMetricsWebSocket(t *testing.T, scopeRevocation bool, disable ...bool) {
 			t.Fatal(err)
 		}
 	}
+	if stream == "logs" {
+		actor, err := service.Authenticate(login.Token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kind := "user"
+		if actor.User.ID == auth.LegacyPrincipal {
+			kind = "legacy"
+		}
+		if err := database.Exec("INSERT INTO role_grants(id,principal_id,principal_kind,role_id,scope_type,scope_id,created_by,created_at) VALUES('fixture-log-reader',?,?,'log-reader','server_group','development','fixture',?)", actor.User.ID, kind, time.Now().UTC()).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	target, _ := url.Parse(server.URL)
 	headers := http.Header{}
 	headers.Set("Origin", server.URL)
 	headers.Set("Cookie", auth.CookieName()+"="+login.Token)
 	dialer := websocket.Dialer{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, HandshakeTimeout: 3 * time.Second}
-	ws, _, err := dialer.Dial("wss://"+target.Host+"/ws/metrics/fixture", headers)
+	ws, _, err := dialer.Dial("wss://"+target.Host+"/ws/"+stream+"/fixture"+func() string {
+		if stream == "logs" {
+			return "/" + strings.Repeat("a", 12)
+		}
+		return ""
+	}(), headers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,12 +250,28 @@ func testMetricsWebSocket(t *testing.T, scopeRevocation bool, disable ...bool) {
 		if err := service.ChangeStatus(administrator, actor.User.ID, "disabled", ""); err != nil {
 			t.Fatal(err)
 		}
-	} else if scopeRevocation {
+	} else if cause == "scope" {
 		if err := database.Exec("DELETE FROM server_group_members WHERE group_id='development'").Error; err != nil {
 			t.Fatal(err)
 		}
 		if _, err := auth.NewService(database, cfg).Authenticate(login.Token); err != nil {
 			t.Fatal("scope test unexpectedly revoked the session itself")
+		}
+	} else if cause == "role_revoked" {
+		if err := database.Exec("DELETE FROM role_grants WHERE principal_id=?", auth.LegacyPrincipal).Error; err != nil {
+			t.Fatal(err)
+		}
+	} else if cause == "absolute_expiry" || cause == "idle_expiry" {
+		column := "expires_at"
+		if cause == "idle_expiry" {
+			column = "last_used_at"
+		}
+		actor, err := service.Authenticate(login.Token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := database.Model(&auth.Session{}).Where("id=?", actor.Session.ID).Update(column, time.Now().UTC().Add(-48*time.Hour)).Error; err != nil {
+			t.Fatal(err)
 		}
 	} else {
 		request, err := http.NewRequest("POST", server.URL+"/api/auth/logout", strings.NewReader("{}"))
@@ -241,4 +299,23 @@ func testMetricsWebSocket(t *testing.T, scopeRevocation bool, disable ...bool) {
 			break
 		}
 	}
+	// WebSocket close reaches the client before the handler's deferred durable
+	// completion. Wait for that completion before closing SQLite/removing fixtures.
+	action := "GET /ws/metrics/{id}"
+	if stream == "logs" {
+		action = "GET /ws/logs/{id}/{cid}"
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int64
+		if err := database.Table("operation_events").Where("source='websocket' AND action=? AND outcome='stream_closed'", action).Count(&count).Error; err != nil {
+			t.Fatal(err)
+		}
+		if count > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("stream closed without persisted audit completion")
+
 }
