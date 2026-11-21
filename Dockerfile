@@ -9,6 +9,7 @@ FROM golang:1.26-alpine AS backend
 RUN apk add --no-cache gcc musl-dev
 WORKDIR /build
 COPY nexus/ .
+COPY integrations/ansible/environment.py integrations/ansible/requirements.lock /integrations/ansible/
 COPY --from=frontend /app/dist ./internal/static/dist
 RUN CGO_ENABLED=1 go test ./... && CGO_ENABLED=1 go build -tags production -o nexus ./cmd/nexus
 
