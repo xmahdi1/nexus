@@ -32,6 +32,7 @@ with tempfile.TemporaryDirectory(prefix='nexus-browser-lab-') as directory:
         NEXUS_ENABLE_INVENTORY='true',
         NEXUS_ENABLE_JOB_SUPERVISION='true',
         NEXUS_ENABLE_VAULT='true',
+        NEXUS_ENABLE_AUTOMATION='true',
         NEXUS_LAB_URL=f'http://127.0.0.1:{port}',
     )
     # Generate encryption material at runtime rather than embedding a test key.
@@ -42,6 +43,11 @@ with tempfile.TemporaryDirectory(prefix='nexus-browser-lab-') as directory:
     with sqlite3.connect(env['NEXUS_DB_PATH']) as db:
         for target in ['dev','prod']:
             db.execute("INSERT INTO servers(id,name,host,port,username) VALUES(?,?,?,1,'fixture')",(target,'Fixture '+target,'127.0.0.1'))
+        actor=db.execute("SELECT id FROM users WHERE username='owner'").fetchone()[0]
+        for role in ('ansible-inventory','ansible-environment'):
+            db.execute("INSERT INTO role_grants(id,principal_id,principal_kind,role_id,scope_type,scope_id,created_by,created_at) VALUES(?,?,'user',?,'server','dev',?,CURRENT_TIMESTAMP)",('browser-'+role,actor,role,actor))
+        db.execute("INSERT INTO server_groups(id,name,created_at) VALUES('automation','Automation fixture',CURRENT_TIMESTAMP)")
+        db.execute("INSERT INTO server_group_members(group_id,server_id) VALUES('automation','dev'),('automation','prod')")
     with open(directory+'/server.log','w') as log:
         process=subprocess.Popen([str(binary)],env=env,cwd=directory,stdout=log,stderr=log)
         try:

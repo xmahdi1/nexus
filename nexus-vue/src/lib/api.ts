@@ -270,7 +270,8 @@ export interface RunObservation {
     observation: {state: string; verified: boolean; empty: boolean; exitCode: number | null; output: string; truncated: boolean; released: boolean; detail: string; noDispatch: boolean};
     automaticRetryAllowed: false;
 }
-export type ServerOperation = 'compose-up'|'compose-down'|'container-start'|'container-stop'|'container-restart'|'container-remove'
+export type AnsibleEnvironmentAction = 'ansible-environment-install'|'ansible-environment-update'|'ansible-environment-health'|'ansible-environment-remove'
+export type ServerOperation = AnsibleEnvironmentAction|'compose-up'|'compose-down'|'container-start'|'container-stop'|'container-restart'|'container-remove'
 export interface InteractiveRun extends SupervisedRun {kind:'operation';action:ServerOperation;targetId:string}
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -346,8 +347,9 @@ export const api = {
  operations:{
   start:(sid:string,action:ServerOperation,requestId:string,target:{path?:string;cid?:string})=>{
    const compose=action.startsWith('compose-')
-   if(compose?(!target.path||!!target.cid):(!target.cid||!!target.path))throw new Error('Choose one valid operation target.')
-   const suffix=compose?'compose/'+action.slice('compose-'.length):'containers/'+encodeURIComponent(target.cid!)+ '/'+action.slice('container-'.length)
+   const environment=action.startsWith('ansible-environment-')
+   if(environment?(!!target.path||!!target.cid):compose?(!target.path||!!target.cid):(!target.cid||!!target.path))throw new Error('Choose one valid operation target.')
+   const suffix=environment?'ansible/environment/'+action.slice('ansible-environment-'.length):compose?'compose/'+action.slice('compose-'.length):'containers/'+encodeURIComponent(target.cid!)+ '/'+action.slice('container-'.length)
    return request<{run:InteractiveRun;automaticRetryAllowed:false}>('POST',`/servers/${encodeURIComponent(sid)}/operations/${suffix}`,{requestId,...(compose?{path:target.path}:{})})
   },
   list:(sid:string)=>request<InteractiveRun[]>('GET',`/servers/${encodeURIComponent(sid)}/operations/runs`),

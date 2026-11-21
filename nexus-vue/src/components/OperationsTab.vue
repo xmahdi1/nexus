@@ -14,18 +14,18 @@ const error = ref('')
 const busy = ref(false)
 let alive = true
 let generation = 0
-const labels: Record<string,string> = {'compose-up':'Start Compose services','compose-down':'Stop Compose services','container-start':'Start container','container-stop':'Stop container','container-restart':'Restart container','container-remove':'Remove stopped container'}
-function readPermission(run: InteractiveRun) { return run.action.startsWith('compose-') ? 'compose.read' : 'docker.read' }
+const labels: Record<string,string> = {'ansible-environment-install':'Install Ansible environment','ansible-environment-update':'Update Ansible environment','ansible-environment-health':'Check Ansible environment','ansible-environment-remove':'Remove Ansible environment','compose-up':'Start Compose services','compose-down':'Stop Compose services','container-start':'Start container','container-stop':'Stop container','container-restart':'Restart container','container-remove':'Remove stopped container'}
+function readPermission(run: InteractiveRun) { return run.action.startsWith('ansible-environment-') ? 'ansible.environment.read' : run.action.startsWith('compose-') ? 'compose.read' : 'docker.read' }
 function viewable(run: InteractiveRun) { return [readPermission(run),'jobs.read','logs.read','secrets.use'].every(p => can(p,props.serverId)) }
 function cancellable(run: InteractiveRun) {
-  const extra = run.action.startsWith('compose-') ? ['compose.write','deployments.execute'] : [run.action==='container-remove'?'docker.remove':'docker.manage']
+  const extra = run.action.startsWith('ansible-environment-') ? [run.action==='ansible-environment-health'?'ansible.environment.read':'ansible.environment.manage'] : run.action.startsWith('compose-') ? ['compose.write','deployments.execute'] : [run.action==='container-remove'?'docker.remove':'docker.manage']
   return ['jobs.cancel','servers.execute','secrets.use',...extra].every(p => can(p,props.serverId))
 }
 function clear() { generation++; runs.value=[]; result.value=null; resultId.value=''; error.value=''; busy.value=false }
 watch(() => props.serverId, () => { clear(); void load() })
 watch(() => props.selectedId, () => { generation++;busy.value=false;result.value=null;resultId.value='';void load() })
 watch(() => can('jobs.read',props.serverId), allowed => {clear();if(allowed)void load()})
-watch(() => ['logs.read','secrets.use','compose.read','docker.read'].map(p=>can(p,props.serverId)).join(','), () => {generation++;busy.value=false;result.value=null;resultId.value=''})
+watch(() => ['logs.read','secrets.use','compose.read','docker.read','ansible.environment.read','ansible.environment.manage'].map(p=>can(p,props.serverId)).join(','), () => {generation++;busy.value=false;result.value=null;resultId.value=''})
 onUnmounted(() => { alive=false; clear() })
 async function load() {
   if (busy.value||!can('jobs.read',props.serverId)) return
@@ -39,7 +39,7 @@ async function act(action:'read'|'inspect'|'cancel'|'release',run:InteractiveRun
   if(busy.value)return
   const version=generation,server=props.serverId
   if(action==='cancel'||action==='release') {
-    const ok=await confirm({title:action==='cancel'?'Cancel operation?':'Remove operation artifacts?',message:action==='cancel'?`Stop the command for run ${run.id}? This cannot undo changes already delegated to Docker.`:`Remove retained remote supervisor files for completed run ${run.id}? The saved Nexus result remains in history.`,confirmText:action==='cancel'?'Cancel operation':'Remove artifacts',destructive:true})
+    const ok=await confirm({title:action==='cancel'?'Cancel operation?':'Remove operation artifacts?',message:action==='cancel'?`Stop the command for run ${run.id}? This cannot undo changes already applied by the operation.`:`Remove retained remote supervisor files for completed run ${run.id}? The saved Nexus result remains in history.`,confirmText:action==='cancel'?'Cancel operation':'Remove artifacts',destructive:true})
     if(!ok||!alive||version!==generation||server!==props.serverId)return
   }
   busy.value=true;error.value='';result.value=null;resultId.value=''
@@ -59,7 +59,7 @@ onMounted(load)
 <template>
   <section aria-label="Supervised operations" class="space-y-4">
     <div class="flex flex-wrap justify-between gap-2"><h2 class="font-semibold">Operation history</h2><Button variant="outline" :disabled="busy" @click="load">Refresh history</Button></div>
-    <p class="text-sm text-muted-foreground">Compose and container commands can be inspected after a disconnect or restart. An uncertain result is never resubmitted automatically. Cancellation stops the command; Docker may already have changed services.</p>
+    <p class="text-sm text-muted-foreground">Server commands can be inspected after a disconnect or restart. An uncertain result is never resubmitted automatically. Cancellation stops the command; Changes may already have been applied.</p>
     <p v-if="!enabled" class="text-sm">New supervised operations are disabled. Existing runs remain available for inspection and cleanup.</p>
     <p v-if="selectedId" class="text-sm break-all">Submitted run ID: {{ selectedId }}</p>
     <p v-if="error" role="alert" class="text-destructive">{{ error }}</p>

@@ -22,6 +22,38 @@ try{
  }
  await login(ownerPage,'owner')
  const credentialBudgetStarted=Date.now()
+ // Real inventory preview; explicit grants include dev but exclude prod in the
+ // same automation group. Environment submission below is a UI-only fixture.
+ await ownerPage.goto(url+'/automation')
+ await ownerPage.getByRole('heading',{name:'Dynamic inventory',exact:true}).waitFor()
+ await ownerPage.getByRole('button',{name:'Preview current targets',exact:true}).click()
+ await ownerPage.getByRole('cell',{name:'dev',exact:true}).waitFor()
+ assert.equal(await ownerPage.getByRole('cell',{name:'prod',exact:true}).count(),0)
+ assert.equal(await ownerPage.getByLabel('Copy once into a private token file (mode 0600)').count(),0)
+ let environmentStarts=0, environmentRun
+ await ownerPage.route('**/api/features',route=>route.fulfill({status:200,json:{automation:true,inventory:true,jobSupervision:true,vault:true,operationSupervision:true}}))
+ await ownerPage.route('**/api/servers/dev/operations/ansible/environment/install',route=>{
+  environmentStarts++;const {requestId}=route.request().postDataJSON();assert.match(requestId,/^[a-f0-9]{32}$/)
+  environmentRun={id:requestId,kind:'operation',action:'ansible-environment-install',serverId:'dev',state:'running',finishedAt:null}
+  return route.fulfill({status:202,json:{run:environmentRun,automaticRetryAllowed:false}})
+ })
+ await ownerPage.route('**/api/servers/dev/operations/runs/*/inspect',route=>route.fulfill({status:200,json:{run:{...environmentRun,state:'exited',finishedAt:new Date().toISOString()},observation:{state:'exited',output:'{"state":"ready","version":"2.22.0"}'},automaticRetryAllowed:false}}))
+ await ownerPage.goto(url+'/servers/dev')
+ await ownerPage.getByRole('button',{name:'Ansible',exact:true}).click()
+ const environmentPanel=ownerPage.getByRole('region',{name:'Ansible environment',exact:true})
+ await environmentPanel.getByRole('button',{name:'Install',exact:true}).click()
+ await ownerPage.getByText('Install Ansible environment?',{exact:true}).waitFor()
+ await ownerPage.getByRole('button',{name:'Install',exact:true}).last().click()
+ await environmentPanel.getByText('Submission state: running',{exact:true}).waitFor()
+ assert.equal(await environmentPanel.getByRole('button',{name:'Install',exact:true}).isDisabled(),true)
+ await environmentPanel.getByRole('button',{name:'Inspect retained run',exact:true}).click()
+ await environmentPanel.getByText('{"state":"ready","version":"2.22.0"}',{exact:true}).waitFor()
+ assert.equal(environmentStarts,1)
+ await ownerPage.reload();await ownerPage.getByRole('button',{name:'Ansible',exact:true}).click()
+ assert.equal(environmentStarts,1,'reload must not resubmit environment work')
+ await ownerPage.unroute('**/api/features')
+ await ownerPage.unroute('**/api/servers/dev/operations/ansible/environment/install')
+ await ownerPage.unroute('**/api/servers/dev/operations/runs/*/inspect')
  const invite=await api(owner,'/users/invitations',{username:'viewer',roleId:'viewer',scopeType:'server',scopeId:'dev',currentPassword:password});assert.equal(invite.status(),201);const invitation=await invite.json()
  await viewerPage.goto(url+'/join#invite='+invitation.token)
  await viewerPage.getByLabel('New password',{exact:true}).fill(password);await viewerPage.getByLabel('Confirm password',{exact:true}).fill(password);await viewerPage.getByRole('button',{name:'Accept invitation',exact:true}).click()
@@ -408,5 +440,5 @@ try{
  await viewerPage.goto(url+'/servers');await viewerPage.waitForURL('**/login')
  await ownerPage.route('**/api/auth/permissions',route=>route.fulfill({status:200,contentType:'text/html',body:'<html>Outer proxy sign in</html>'}))
  await ownerPage.goto(url+'/servers');await ownerPage.waitForURL('**/login',{timeout:10000})
- console.log('Chrome lab passed: accounts/MFA/scopes, stream and mutation guards, certificate renewal, supervised scheduled/interactive run history/cancellation and reload without replay, Vault access/admin/KV/one-time reveal, audit and proxy HTML handling.')
+ console.log('Chrome lab passed: scoped Ansible inventory, environment confirmation/inspection/reload without replay, accounts/MFA/scopes, stream and mutation guards, certificate renewal, supervised scheduled/interactive history/cancellation, Vault access/admin/KV, audit and proxy HTML handling.')
 }finally{await browser.close()}

@@ -31,6 +31,7 @@ import AppsTab from '@/components/AppsTab.vue'
 import CronTab from '@/components/CronTab.vue'
 import ScheduledTasksTab from '@/components/ScheduledTasksTab.vue'
 import OperationsTab from '@/components/OperationsTab.vue'
+import AnsibleEnvironmentTab from '@/components/AnsibleEnvironmentTab.vue'
 import FirewallTab from '@/components/FirewallTab.vue'
 import DbExecModal from '@/components/DbExecModal.vue'
 
@@ -55,6 +56,7 @@ interface TermSession {
 }
 
 const tabs = [
+  {key:'ansible',label:'Ansible',icon:Timer},
   {key:'vault',label:'Vault',icon:ShieldCheck},
   {key:'inventory',label:'Inventory',icon:BarChart3},
   {key: 'terminal', label: t('server.tabs.terminal'), icon: TerminalIcon},
@@ -70,13 +72,14 @@ const tabs = [
   {key: 'firewall', label: 'Firewall', icon: ShieldCheck},
 ] as const
 
-const tabPermissions: Record<string,string[]> = {operations:['jobs.read'],vault:['integrations.manage','servers.read'],inventory:['inventory.read'],terminal:['servers.terminal','servers.execute'],containers:['docker.read'],compose:['compose.read'],metrics:['metrics.read'],files:['files.list'],proxy:['proxy.read','proxy.manage'],apps:['deployments.read','templates.read'],cron:['jobs.read','logs.read'],tasks:['jobs.read','logs.read'],firewall:['firewall.read','network.read']}
+const tabPermissions: Record<string,string[]> = {ansible:['ansible.environment.read'],operations:['jobs.read'],vault:['integrations.manage','servers.read'],inventory:['inventory.read'],terminal:['servers.terminal','servers.execute'],containers:['docker.read'],compose:['compose.read'],metrics:['metrics.read'],files:['files.list'],proxy:['proxy.read','proxy.manage'],apps:['deployments.read','templates.read'],cron:['jobs.read','logs.read'],tasks:['jobs.read','logs.read'],firewall:['firewall.read','network.read']}
+const automationEnabled=ref(false)
 const inventoryEnabled=ref(false)
 const vaultEnabled=ref(false)
 const operationsEnabled=ref(false)
 const operationSelection=ref('')
 const visibleTabs = tabs.filter(tab => tabPermissions[tab.key]!.every(permission => can(permission,serverId)))
-const activeTab = ref<'operations'|'vault' | 'inventory' | 'terminal' | 'containers' | 'compose' | 'metrics' | 'files' | 'proxy' | 'apps' | 'cron' | 'tasks' | 'firewall'>(visibleTabs.find(tab=>tab.key!=='inventory' && tab.key!=='vault')?.key ?? 'containers')
+const activeTab = ref<'ansible'|'operations'|'vault' | 'inventory' | 'terminal' | 'containers' | 'compose' | 'metrics' | 'files' | 'proxy' | 'apps' | 'cron' | 'tasks' | 'firewall'>(visibleTabs.find(tab=>tab.key!=='inventory' && tab.key!=='vault' && tab.key!=='ansible')?.key ?? 'containers')
 const server = ref(store.list.find(s => s.id === serverId))
 const tagSaving = ref(false)
 const monitoredContainerIds = ref<Set<string>>(new Set())
@@ -491,7 +494,7 @@ async function composeDown() {
 }
 
 onMounted(async () => {
-  try{const features=await api.features();inventoryEnabled.value=features.inventory;vaultEnabled.value=features.vault;operationsEnabled.value=features.operationSupervision===true}catch{}
+  try{const features=await api.features();automationEnabled.value=features.automation===true;inventoryEnabled.value=features.inventory;vaultEnabled.value=features.vault;operationsEnabled.value=features.operationSupervision===true}catch{}
   if (!server.value) {
     try {
       const s = await api.servers.get(serverId)
@@ -819,6 +822,9 @@ watch(activeTab, tab => {
       </div>
       <div v-if="activeTab === 'tasks'">
         <ScheduledTasksTab :server-id="serverId"/>
+      </div>
+      <div v-if="activeTab === 'ansible'">
+        <AnsibleEnvironmentTab :server-id="serverId" :enabled="automationEnabled && operationsEnabled" @submitted="operationSelection = $event"/>
       </div>
       <div v-if="activeTab === 'operations'">
         <OperationsTab :server-id="serverId" :selected-id="operationSelection" :enabled="operationsEnabled" />

@@ -26,6 +26,14 @@ test('inventory history and relationships keep cursors and targets scoped',async
  await api.inventory.relationships('dev/id','b'.repeat(64))
  assert.deepEqual(paths,[`/api/servers/dev%2Fid/inventory/history?resourceId=${'a'.repeat(64)}&before=9`,`/api/servers/dev%2Fid/inventory/relationships?after=${'b'.repeat(64)}`])
 })
+test('environment actions use fixed routes and reject caller-selected paths',async()=>{
+ let calls=0
+ globalThis.fetch=async(url,options)=>{calls++;assert.equal(url,'/api/servers/dev%2Fid/operations/ansible/environment/install');assert.deepEqual(JSON.parse(options.body),{requestId:'a'.repeat(32)});throw new TypeError('fixture response lost')}
+ await assert.rejects(api.operations.start('dev/id','ansible-environment-install','a'.repeat(32),{}),{code:'remote_outcome_unknown'})
+ assert.equal(calls,1)
+ assert.throws(()=>api.operations.start('dev','ansible-environment-install','a'.repeat(32),{path:'/tmp/override'}),/valid operation target/)
+ assert.equal(calls,1)
+})
 globalThis.window = {dispatchEvent: e => events.push(e.type), location: {href: ''}}
 globalThis.localStorage = {removeItem() {}}
 globalThis.CustomEvent = class {constructor(type) {this.type = type}}
