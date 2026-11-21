@@ -14,7 +14,22 @@ type migration struct {
 	Up      func(*gorm.DB) error
 }
 
-var schemaMigrations = []migration{{1, "legacy_baseline", migrations.Baseline}, {2, "local_identity", migrations.Identity}, {3, "revocable_sessions", migrations.Sessions}, {4, "scoped_authorization", migrations.Authorization}, {5, "invitation_accounts", migrations.Accounts}, {6, "operation_audit", migrations.OperationAudit}, {7, "high_risk_policy", migrations.HighRisk}, {8, "read_only_inventory", migrations.Inventory}, {9, "encrypted_deployment_variables", func(tx *gorm.DB) error { return migrations.DeploymentSecrets(tx, nil) }}, {10, "encrypted_template_definitions", func(tx *gorm.DB) error { return migrations.TemplateSecrets(tx, nil) }}, {11, "supervised_job_runs", migrations.SupervisedRuns}, {12, "vault_connections", migrations.VaultConnections}, {13, "interactive_operations", migrations.InteractiveOperations}}
+var schemaMigrations = []migration{
+	{1, "legacy_baseline", migrations.Baseline},
+	{2, "local_identity", migrations.Identity},
+	{3, "revocable_sessions", migrations.Sessions},
+	{4, "scoped_authorization", migrations.Authorization},
+	{5, "invitation_accounts", migrations.Accounts},
+	{6, "operation_audit", migrations.OperationAudit},
+	{7, "high_risk_policy", migrations.HighRisk},
+	{8, "read_only_inventory", migrations.Inventory},
+	{9, "encrypted_deployment_variables", func(tx *gorm.DB) error { return migrations.DeploymentSecrets(tx, nil) }},
+	{10, "encrypted_template_definitions", func(tx *gorm.DB) error { return migrations.TemplateSecrets(tx, nil) }},
+	{11, "supervised_job_runs", migrations.SupervisedRuns},
+	{12, "vault_connections", migrations.VaultConnections},
+	{13, "interactive_operations", migrations.InteractiveOperations},
+	{14, "inventory_details", migrations.InventoryDetails},
+}
 
 type schemaMigration struct {
 	Version   int       `gorm:"primaryKey;autoIncrement:false"`
