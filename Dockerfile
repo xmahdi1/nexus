@@ -12,7 +12,7 @@ COPY nexus/ .
 COPY --from=frontend /app/dist ./internal/static/dist
 RUN CGO_ENABLED=1 go test ./... && CGO_ENABLED=1 go build -tags production -o nexus ./cmd/nexus
 
-FROM alpine:3.19
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata
 RUN addgroup -g 1000 nexus && adduser -D -u 1000 -G nexus nexus
 WORKDIR /app
