@@ -20,6 +20,7 @@ let mounted = true
 const hosts = computed(()=>Object.entries(preview.value?.inventory._meta.hostvars ?? {}))
 function clearSecret() { issued.value=''; clearTimeout(clearTimer) }
 function clearData() { groups.value=[]; preview.value=null; tokens.value=[]; clearSecret() }
+watch(()=>canAny('ansible.inventory.read'), allowed=>{if(!allowed){generation++;enabled.value=false;clearData();error.value='Inventory access was revoked.'}}, {flush:'sync'})
 watch(selected, ()=>{generation++; preview.value=null; clearSecret()}, {flush:'sync'})
 async function load() {
  if (busy.value) return
