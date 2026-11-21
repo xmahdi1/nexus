@@ -236,6 +236,7 @@ path "sys/policies/acl/nexus-fixture" { capabilities = ["read"] }`})
 		t.Fatal("revoked token accepted")
 	}
 	testDisposableAdministration(t, ctx, client, p, initialized.Root, request, createToken)
+	testDisposableDatabaseLease(t, ctx, client, p, initialized.Root, request, createToken)
 	request("POST", "fixture/data/preserved", initialized.Root, []byte(`{"data":{"marker":"before-snapshot"}}`))
 	snapshot := request("GET", "sys/storage/raft/snapshot", initialized.Root, nil)
 	defer clear(snapshot)
