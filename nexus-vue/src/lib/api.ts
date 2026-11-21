@@ -1,3 +1,5 @@
+export interface InventoryRelationship {id:string;serverId:string;sourceId:string;targetId:string;sourceName:string;targetName:string;kind:string;source:string;dataState:string;firstSeenAt:string;lastVerifiedAt:string}
+export interface InventoryChange {id:number;serverId:string;runId:string;resourceId:string;kind:string;at:string;before?:{name:string;details:unknown};after?:{name:string;details:unknown}}
 export interface AccountUser {
  id:string;username:string;displayName:string;email:string|null;status:string;admitted:boolean;mfaEnabled:boolean;recoveryRequired:boolean;createdAt:string;lastLoginAt:string|null
 }
@@ -359,6 +361,8 @@ export const api = {
  inventory:{
  read:(id:string,after='')=>request<{items:Array<{id:string;kind:string;displayName:string;source:string;dataState:string;lastVerifiedAt:string;details:unknown}>;runs:Array<{id:string;status:string;warning:string;startedAt:string}>;changes:unknown[];next:string}>('GET',`/servers/${encodeURIComponent(id)}/inventory?after=${encodeURIComponent(after)}`),
  discover:(id:string)=>request<{status:string;warning:string}>('POST',`/servers/${encodeURIComponent(id)}/inventory/discover`,{}),
+ relationships:(id:string,after='')=>request<{items:InventoryRelationship[];next:string}>('GET',`/servers/${encodeURIComponent(id)}/inventory/relationships?after=${encodeURIComponent(after)}`),
+ history:(id:string,resourceId='',before='')=>request<{items:InventoryChange[];next:string}>('GET',`/servers/${encodeURIComponent(id)}/inventory/history?resourceId=${encodeURIComponent(resourceId)}&before=${encodeURIComponent(before)}`),
  },
  audit: {inspect:(operationId:string)=>request<OperationInspection>('GET','/audit/operations/'+encodeURIComponent(operationId)),list:(filters:Record<string,string>={})=>request<{items:Array<{id:number;at:string;operationId:string;actorId:string;action:string;resourceId:string;outcome:string;httpStatus:number;source:string}>;next:string}>('GET','/audit/events?'+new URLSearchParams({...filters,limit:'50'}).toString())},
     auth: {

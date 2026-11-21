@@ -19,6 +19,13 @@ test('interactive operations bind request identity and never replay a lost respo
  await assert.rejects(api.operations.start('fixture','compose-up','a'.repeat(32),{path:'/opt/fixture.yml'}),{code:'remote_outcome_unknown'})
  assert.equal(calls,1)
 })
+test('inventory history and relationships keep cursors and targets scoped',async()=>{
+ const paths=[]
+ globalThis.fetch=async(url,options)=>{assert.equal(options.method,'GET');paths.push(url);return Response.json({items:[],next:''})}
+ await api.inventory.history('dev/id','a'.repeat(64),'9')
+ await api.inventory.relationships('dev/id','b'.repeat(64))
+ assert.deepEqual(paths,[`/api/servers/dev%2Fid/inventory/history?resourceId=${'a'.repeat(64)}&before=9`,`/api/servers/dev%2Fid/inventory/relationships?after=${'b'.repeat(64)}`])
+})
 globalThis.window = {dispatchEvent: e => events.push(e.type), location: {href: ''}}
 globalThis.localStorage = {removeItem() {}}
 globalThis.CustomEvent = class {constructor(type) {this.type = type}}
