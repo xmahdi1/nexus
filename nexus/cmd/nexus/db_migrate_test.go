@@ -10,7 +10,11 @@ import (
 
 	nexuscrypto "github.com/xmahdi1/nexus/internal/crypto"
 	"github.com/xmahdi1/nexus/internal/db"
+	"github.com/xmahdi1/nexus/internal/db/migrations"
 	"github.com/xmahdi1/nexus/internal/models"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestLocalMigrationLoadsMatchingKeyWithoutStartingWorkers(t *testing.T) {
@@ -18,13 +22,15 @@ func TestLocalMigrationLoadsMatchingKeyWithoutStartingWorkers(t *testing.T) {
 	t.Chdir(directory)
 	key := bytes.Repeat([]byte{4}, 32)
 	path := filepath.Join(directory, "legacy.db")
-	database, err := db.Init(path)
+	// Construct the immutable legacy schema directly. Deleting the newest
+	// migration ledger entries does not recreate an older database.
+	database, err := gorm.Open(sqlite.Open(path), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	connection, _ := database.DB()
 	defer connection.Close()
-	if err := database.Exec("DROP TRIGGER vault_connection_remove;DROP TABLE vault_connections;ALTER TABLE scheduled_tasks DROP COLUMN supervised;DROP TABLE supervised_runs;ALTER TABLE deployed_apps DROP COLUMN vars_enc;ALTER TABLE deployed_apps ADD COLUMN vars_json text;ALTER TABLE custom_templates DROP COLUMN definition_enc;ALTER TABLE custom_templates ADD COLUMN compose text;ALTER TABLE custom_templates ADD COLUMN vars_json text;ALTER TABLE custom_templates ADD COLUMN post_deploy text;DELETE FROM schema_migrations WHERE version>=9").Error; err != nil {
+	if err := database.Transaction(migrations.Baseline); err != nil {
 		t.Fatal(err)
 	}
 	encrypted, err := nexuscrypto.Encrypt(key, []byte("fixture key bytes"))
