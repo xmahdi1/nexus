@@ -16,7 +16,7 @@ let alive = true
 let generation = 0
 const labels: Record<string,string> = {'compose-up':'Start Compose services','compose-down':'Stop Compose services','container-start':'Start container','container-stop':'Stop container','container-restart':'Restart container','container-remove':'Remove stopped container'}
 function readPermission(run: InteractiveRun) { return run.action.startsWith('compose-') ? 'compose.read' : 'docker.read' }
-function viewable(run: InteractiveRun) { return [readPermission(run),'logs.read','secrets.use'].every(p => can(p,props.serverId)) }
+function viewable(run: InteractiveRun) { return [readPermission(run),'jobs.read','logs.read','secrets.use'].every(p => can(p,props.serverId)) }
 function cancellable(run: InteractiveRun) {
   const extra = run.action.startsWith('compose-') ? ['compose.write','deployments.execute'] : [run.action==='container-remove'?'docker.remove':'docker.manage']
   return ['jobs.cancel','servers.execute','secrets.use',...extra].every(p => can(p,props.serverId))
@@ -24,10 +24,11 @@ function cancellable(run: InteractiveRun) {
 function clear() { generation++; runs.value=[]; result.value=null; resultId.value=''; error.value=''; busy.value=false }
 watch(() => props.serverId, () => { clear(); void load() })
 watch(() => props.selectedId, () => { generation++;busy.value=false;result.value=null;resultId.value='';void load() })
+watch(() => can('jobs.read',props.serverId), allowed => {clear();if(allowed)void load()})
 watch(() => ['logs.read','secrets.use','compose.read','docker.read'].map(p=>can(p,props.serverId)).join(','), () => {generation++;busy.value=false;result.value=null;resultId.value=''})
 onUnmounted(() => { alive=false; clear() })
 async function load() {
-  if (busy.value) return
+  if (busy.value||!can('jobs.read',props.serverId)) return
   const version=generation,server=props.serverId
   busy.value=true;error.value='';result.value=null;resultId.value=''
   try { const data=await api.operations.list(server);if(alive&&version===generation&&server===props.serverId) runs.value=data }
