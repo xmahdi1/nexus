@@ -29,7 +29,7 @@ func fixture(t *testing.T) *Service {
 	return &Service{DB: database}
 }
 func observation() Observation {
-	return Observation{Host: Host{Hostname: "fixture", OS: "Fixture Linux", Kernel: "6.fixture"}, HostOK: true, DockerOK: true, SocketsOK: true, Containers: []Container{{ID: strings.Repeat("a", 64), Name: "db", Image: "db:1", State: "running"}}, Ports: []Port{{Protocol: "tcp", Address: "127.0.0.1", Port: 22, Exposure: "listener"}, {ContainerID: strings.Repeat("a", 64), Protocol: "tcp", Port: 3306, TargetPort: 3306, Exposure: "container_internal"}}}
+	return Observation{Host: Host{Hostname: "fixture", OS: "Fixture Linux", Kernel: "6.fixture"}, HostOK: true, DockerOK: true, SocketsOK: true, ServicesOK: true, Containers: []Container{{ID: strings.Repeat("a", 64), Name: "db", Image: "db:1", State: "running"}}, Ports: []Port{{Protocol: "tcp", Address: "127.0.0.1", Port: 22, Exposure: "listener"}, {ContainerID: strings.Repeat("a", 64), Protocol: "tcp", Port: 3306, TargetPort: 3306, Exposure: "container_internal"}}}
 }
 func TestIdempotenceChangesProvenanceAndUnreachableStale(t *testing.T) {
 	s := fixture(t)

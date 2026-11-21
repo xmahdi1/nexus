@@ -72,6 +72,7 @@ func (a *SSHAdapter) Collect(ctx context.Context, serverID string) (Observation,
 	if err != nil {
 		return obs, err
 	}
+	defer clear(key)
 	client, err := a.Pool.GetContext(ctx, nexusssh.ServerConfig{ID: server.ID, Host: server.Host, Port: server.Port, User: server.Username, PrivKey: key})
 	if err != nil {
 		return obs, err
@@ -94,6 +95,12 @@ func (a *SSHAdapter) Collect(ctx context.Context, serverID string) (Observation,
 		if parseErr == nil {
 			obs.Ports = ports
 			obs.SocketsOK = true
+		}
+	}
+	if raw, err := run(ctx, client, serviceCommand); err == nil {
+		if units, err := parseServices(raw); err == nil {
+			obs.Services = units
+			obs.ServicesOK = true
 		}
 	}
 	ids, err := run(ctx, client, "command -v docker >/dev/null 2>&1 && docker --host unix:///var/run/docker.sock ps -aq --no-trunc")
@@ -128,6 +135,50 @@ func (a *SSHAdapter) Collect(ctx context.Context, serverID string) (Observation,
 }
 
 var containerID = regexp.MustCompile(`^[a-fA-F0-9]{12,64}$`)
+
+const serviceCommand = "LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl show --all --no-pager --property=Id,LoadState,ActiveState,SubState '*.service'"
+
+var serviceUnitPattern = regexp.MustCompile(`^[A-Za-z0-9:_.@\\-]+\.service$`)
+var serviceStatePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
+
+func validService(unit ServiceUnit) bool {
+	return len(unit.Unit) <= 255 && serviceUnitPattern.MatchString(unit.Unit) && serviceStatePattern.MatchString(unit.Load) && serviceStatePattern.MatchString(unit.Active) && serviceStatePattern.MatchString(unit.Sub)
+}
+func parseServices(raw string) ([]ServiceUnit, error) {
+	if len(raw) > 1<<20 {
+		return nil, errors.New("invalid service collection")
+	}
+	rows := []ServiceUnit{}
+	seen := map[string]bool{}
+	for _, block := range strings.Split(strings.TrimSpace(raw), "\n\n") {
+		if strings.TrimSpace(block) == "" {
+			continue
+		}
+		values := map[string]string{}
+		for _, line := range strings.Split(block, "\n") {
+			key, value, ok := strings.Cut(line, "=")
+			if !ok {
+				return nil, errors.New("invalid service properties")
+			}
+			if _, exists := values[key]; exists {
+				return nil, errors.New("duplicate service property")
+			}
+			switch key {
+			case "Id", "LoadState", "ActiveState", "SubState":
+				values[key] = value
+			default:
+				return nil, errors.New("unexpected service property")
+			}
+		}
+		unit := ServiceUnit{Unit: values["Id"], Load: values["LoadState"], Active: values["ActiveState"], Sub: values["SubState"]}
+		if len(values) != 4 || !validService(unit) || seen[unit.Unit] || len(rows) >= 1000 {
+			return nil, errors.New("invalid service unit")
+		}
+		seen[unit.Unit] = true
+		rows = append(rows, unit)
+	}
+	return rows, nil
+}
 
 func parseSockets(raw string) ([]Port, error) {
 	result := []Port{}

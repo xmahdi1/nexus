@@ -8,12 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
+
 	"github.com/xmahdi1/nexus/internal/audit"
 	"github.com/xmahdi1/nexus/internal/authorization"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
-	"strings"
-	"time"
 )
 
 type Host struct {
@@ -39,6 +40,8 @@ type Observation struct {
 	Host                        Host
 	Containers                  []Container
 	Ports                       []Port
+	Services                    []ServiceUnit
+	ServicesOK                  bool
 	HostOK, DockerOK, SocketsOK bool
 }
 type Adapter interface {
@@ -94,12 +97,16 @@ type Run struct {
 func (Run) TableName() string { return "discovery_runs" }
 
 type Change struct {
-	ID         uint64    `json:"id"`
-	ServerID   string    `json:"serverId"`
-	RunID      string    `json:"runId"`
-	ResourceID string    `json:"resourceId"`
-	Kind       string    `json:"kind"`
-	At         time.Time `json:"at"`
+	ID         uint64          `json:"id"`
+	ServerID   string          `json:"serverId"`
+	RunID      string          `json:"runId"`
+	ResourceID string          `json:"resourceId"`
+	Kind       string          `json:"kind"`
+	At         time.Time       `json:"at"`
+	BeforeJSON string          `json:"-"`
+	AfterJSON  string          `json:"-"`
+	Before     json.RawMessage `gorm:"-" json:"before,omitempty"`
+	After      json.RawMessage `gorm:"-" json:"after,omitempty"`
 }
 
 func (Change) TableName() string { return "inventory_changes" }
@@ -170,6 +177,9 @@ func (s *Service) Discover(ctx context.Context, actor, server string) (Run, erro
 		if err := tx.Model(&Resource{}).Where("server_id=? AND data_state!='retired'", server).Update("data_state", "stale").Error; err != nil {
 			return err
 		}
+		if err := tx.Model(&Relationship{}).Where("server_id=? AND data_state!='retired'", server).Update("data_state", "stale").Error; err != nil {
+			return err
+		}
 		run.Status = "failed"
 		run.Warning = "Collection failed; previous observations retained as stale."
 		if !allowed {
@@ -178,7 +188,7 @@ func (s *Service) Discover(ctx context.Context, actor, server string) (Run, erro
 		} else if collectErr == nil && observation.HostOK {
 			run.Status = "succeeded"
 			run.Warning = ""
-			if !observation.DockerOK || !observation.SocketsOK {
+			if !observation.DockerOK || !observation.SocketsOK || !observation.ServicesOK {
 				run.Status = "partial"
 				run.Warning = "Some collectors unavailable; prior observations retained as stale."
 			}
@@ -197,6 +207,9 @@ func (s *Service) Discover(ctx context.Context, actor, server string) (Run, erro
 			if e := tx.Model(&Resource{}).Where("server_id=? AND data_state!='retired'", server).Update("data_state", "stale").Error; e != nil {
 				return e
 			}
+			if e := tx.Model(&Relationship{}).Where("server_id=? AND data_state!='retired'", server).Update("data_state", "stale").Error; e != nil {
+				return e
+			}
 			if e := tx.Model(&Run{}).Where("id=? AND status='running'", run.ID).Updates(map[string]any{"status": "failed", "finished_at": finished, "warning": "Could not publish observations; previous data retained."}).Error; e != nil {
 				return e
 			}
@@ -210,7 +223,7 @@ func (s *Service) Discover(ctx context.Context, actor, server string) (Run, erro
 	return run, nil
 }
 func (s *Service) persist(tx *gorm.DB, run Run, obs Observation, now time.Time) error {
-	if len(obs.Containers) > 500 || len(obs.Ports) > 10000 {
+	if len(obs.Containers) > 500 || len(obs.Ports) > 10000 || len(obs.Services) > 1000 {
 		return errors.New("observation limit exceeded")
 	}
 	seen := map[string]bool{}
@@ -225,7 +238,7 @@ func (s *Service) persist(tx *gorm.DB, run Run, obs Observation, now time.Time) 
 		if len(raw) > 4096 {
 			return errors.New("observation too large")
 		}
-		id := hash(run.ServerID + "\x00" + kind + "\x00" + key)
+		id := resourceID(run.ServerID, kind, key)
 		if seen[id] {
 			return nil
 		}
@@ -237,11 +250,20 @@ func (s *Service) persist(tx *gorm.DB, run Run, obs Observation, now time.Time) 
 		}
 		resource := Resource{ID: id, ServerID: run.ServerID, Kind: kind, NaturalKey: key, DisplayName: name, Source: source, Fingerprint: hash(string(raw)), FirstSeenAt: now, LastSeenAt: now, LastVerifiedAt: now, DataState: "fresh"}
 		change := "observed"
+		before := ""
 		if err == nil {
 			resource.FirstSeenAt = old.FirstSeenAt
 			change = ""
 			if old.Fingerprint != resource.Fingerprint || old.DataState == "retired" {
 				change = "updated"
+				previous, e := detailsFor(tx, old)
+				if e != nil {
+					return e
+				}
+				before, e = summary(old.DisplayName, previous)
+				if e != nil {
+					return e
+				}
 			}
 		}
 		if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&resource).Error; err != nil {
@@ -251,7 +273,11 @@ func (s *Service) persist(tx *gorm.DB, run Run, obs Observation, now time.Time) 
 			return err
 		}
 		if change != "" {
-			return tx.Create(&Change{ServerID: run.ServerID, RunID: run.ID, ResourceID: id, Kind: change, At: now}).Error
+			after, e := summary(name, details)
+			if e != nil {
+				return e
+			}
+			return tx.Create(&Change{ServerID: run.ServerID, RunID: run.ID, ResourceID: id, Kind: change, At: now, BeforeJSON: before, AfterJSON: after}).Error
 		}
 		return nil
 	}
@@ -269,6 +295,17 @@ func (s *Service) persist(tx *gorm.DB, run Run, obs Observation, now time.Time) 
 			return err
 		}
 	}
+	if obs.ServicesOK {
+		for _, unit := range obs.Services {
+			u := unit
+			if !validService(u) {
+				return errors.New("invalid service observation")
+			}
+			if err := put("service", u.Unit, u.Unit, "systemd", u, func(id string) any { return &serviceRow{ResourceID: id, ServiceUnit: u} }); err != nil {
+				return err
+			}
+		}
+	}
 	for _, port := range obs.Ports {
 		p := port
 		if (p.Exposure == "listener" && !obs.SocketsOK) || (p.Exposure != "listener" && !obs.DockerOK) {
@@ -277,7 +314,7 @@ func (s *Service) persist(tx *gorm.DB, run Run, obs Observation, now time.Time) 
 		if p.Port < 1 || p.Port > 65535 || p.TargetPort < 0 || p.TargetPort > 65535 {
 			return errors.New("invalid port")
 		}
-		key := fmt.Sprintf("%s:%s:%s:%d:%d:%s", p.ContainerID, p.Protocol, p.Address, p.Port, p.TargetPort, p.Exposure)
+		key := portNaturalKey(p)
 		if err := put("port", key, fmt.Sprintf("%s %s:%d", p.Protocol, p.Address, p.Port), map[bool]string{true: "ss", false: "docker"}[p.Exposure == "listener"], p, func(id string) any { return &portRow{ResourceID: id, Port: p} }); err != nil {
 			return err
 		}
@@ -287,6 +324,9 @@ func (s *Service) persist(tx *gorm.DB, run Run, obs Observation, now time.Time) 
 		return err
 	}
 	for _, r := range missing {
+		if r.Kind == "service" && !obs.ServicesOK {
+			continue
+		}
 		if r.Kind == "container" && !obs.DockerOK {
 			continue
 		}
@@ -301,19 +341,27 @@ func (s *Service) persist(tx *gorm.DB, run Run, obs Observation, now time.Time) 
 		if err := tx.Model(&r).Update("data_state", "retired").Error; err != nil {
 			return err
 		}
-		if err := tx.Create(&Change{ServerID: run.ServerID, RunID: run.ID, ResourceID: r.ID, Kind: "retired", At: now}).Error; err != nil {
+		previous, e := detailsFor(tx, r)
+		if e != nil {
+			return e
+		}
+		before, e := summary(r.DisplayName, previous)
+		if e != nil {
+			return e
+		}
+		if err := tx.Create(&Change{ServerID: run.ServerID, RunID: run.ID, ResourceID: r.ID, Kind: "retired", At: now, BeforeJSON: before}).Error; err != nil {
 			return err
 		}
 	}
-	return nil
+	return s.persistRelationships(tx, run, obs, now)
 }
 func (s *Service) Read(actor, server string) (Snapshot, error) {
 	return s.ReadPage(actor, server, "", 200)
 }
 func (s *Service) ReadPage(actor, server, after string, limit int) (Snapshot, error) {
 	result := Snapshot{Items: []Item{}, Runs: []Run{}, Changes: []Change{}}
-	if limit < 1 || limit > 200 {
-		return result, errors.New("invalid limit")
+	if limit < 1 || limit > 200 || (after != "" && !resourceIDPattern.MatchString(after)) {
+		return result, ErrPage
 	}
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
 		if !authorization.New(tx).All(actor, server, "inventory.read") {
@@ -332,35 +380,20 @@ func (s *Service) ReadPage(actor, server, after string, limit int) (Snapshot, er
 			if resource.DataState == "fresh" && resource.LastVerifiedAt.Before(cutoff) {
 				resource.DataState = "stale"
 			}
-			var details any
-			switch resource.Kind {
-			case "host":
-				var row hostRow
-				if err := tx.First(&row, "resource_id=?", resource.ID).Error; err != nil {
-					return err
-				}
-				details = row.Host
-			case "container":
-				var row containerRow
-				if err := tx.First(&row, "resource_id=?", resource.ID).Error; err != nil {
-					return err
-				}
-				details = Container{ID: row.EngineID, Name: resource.DisplayName, Image: row.Image, State: row.State}
-			case "port":
-				var row portRow
-				if err := tx.First(&row, "resource_id=?", resource.ID).Error; err != nil {
-					return err
-				}
-				details = row.Port
-			default:
-				continue
+			details, err := detailsFor(tx, resource)
+			if err != nil {
+				return err
 			}
 			result.Items = append(result.Items, Item{resource, details})
 		}
 		if err := tx.Where("server_id=?", server).Order("started_at desc").Limit(20).Find(&result.Runs).Error; err != nil {
 			return err
 		}
-		return tx.Where("server_id=?", server).Order("id desc").Limit(100).Find(&result.Changes).Error
+		if err := tx.Where("server_id=?", server).Order("id desc").Limit(100).Find(&result.Changes).Error; err != nil {
+			return err
+		}
+		hydrateChanges(result.Changes)
+		return nil
 	})
 	return result, err
 }

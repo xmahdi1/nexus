@@ -80,6 +80,8 @@ func TestSSHAdapterUsesFixedAllowlistedCommandsAndPinnedLoopbackHost(t *testing.
 						fmt.Fprint(channel, "fixture-host\n6.fixture\n\"Fixture Linux\"\n")
 					case payload.Command == "ss -H -lntu":
 						fmt.Fprintln(channel, "tcp LISTEN 0 128 127.0.0.1:22 0.0.0.0:*")
+					case payload.Command == serviceCommand:
+						fmt.Fprint(channel, "Id=ssh.service\nLoadState=loaded\nActiveState=active\nSubState=running\n")
 					case strings.Contains(payload.Command, "ps -aq --no-trunc"):
 						fmt.Fprintln(channel, strings.Repeat("a", 64))
 					case strings.HasPrefix(payload.Command, "docker --host unix:///var/run/docker.sock inspect --format"):
@@ -111,13 +113,13 @@ func TestSSHAdapterUsesFixedAllowlistedCommandsAndPinnedLoopbackHost(t *testing.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	observation, err := adapter.Collect(ctx, "dev")
-	if err != nil || !observation.HostOK || !observation.DockerOK || !observation.SocketsOK {
+	if err != nil || !observation.HostOK || !observation.DockerOK || !observation.SocketsOK || !observation.ServicesOK || len(observation.Services) != 1 {
 		t.Fatal("collector failed", observation, err)
 	}
 	if len(observation.Containers) != 1 || len(observation.Ports) != 2 {
 		t.Fatal("observations missing", observation)
 	}
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 5; i++ {
 		select {
 		case command := <-commands:
 			if strings.Contains(command, ".Config.Env") || strings.Contains(command, "sudo") || strings.Contains(command, " nmap ") {
