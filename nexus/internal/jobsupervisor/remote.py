@@ -68,7 +68,16 @@ def main():
     directory = BASE / identity
     if action == 'start':
         command = request['command']
-        if not isinstance(command, str) or not command or '\x00' in command or len(command.encode()) > 16384 or hashlib.sha256(command.encode()).hexdigest() != digest:
+        encoded_input = request.get('input', '')
+        if not isinstance(encoded_input, str) or len(encoded_input) > 131072:
+            return reply('unknown', detail='invalid_command')
+        private_input = base64.b64decode(encoded_input, validate=True)
+        if len(private_input) > 98304:
+            return reply('unknown', detail='invalid_command')
+        if not isinstance(command, str) or not command or '\x00' in command or len(command.encode()) > 16384:
+            return reply('unknown', detail='invalid_command')
+        bound = command if not private_input else 'nexus:job-command-input:v1\x00' + command + '\x00' + hashlib.sha256(private_input).hexdigest()
+        if hashlib.sha256(bound.encode()).hexdigest() != digest:
             return reply('unknown', detail='invalid_command')
         runtime = request['runtimeSeconds']
         if not isinstance(runtime, int) or not 1 <= runtime <= 600:
@@ -90,7 +99,7 @@ def main():
             return reply('capacity_exceeded', noDispatch=True, detail='private_artifact_limit')
         metadata = json.dumps({'id': identity, 'hash': digest}).encode()
         write_new(directory / 'metadata.json', metadata)
-        write_new(directory / 'request.json', json.dumps({'id': identity, 'hash': digest, 'command': command}).encode())
+        write_new(directory / 'request.json', json.dumps({'id': identity, 'hash': digest, 'command': command, 'input': encoded_input}).encode())
         worker = base64.b64decode(request['worker'], validate=True)
         if len(worker) > 32768:
             return reply('unknown', detail='invalid_worker')

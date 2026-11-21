@@ -44,6 +44,7 @@ func (s Snapshot) Terminal() bool {
 }
 
 type Request struct {
+	Input          []byte      `json:"input,omitempty"`
 	BeforeDispatch func() bool `json:"-"`
 	Action         string      `json:"action"`
 	ID             string      `json:"id,omitempty"`
@@ -59,6 +60,17 @@ func Digest(command string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// DigestWithInput binds private stdin to the same immutable invocation identity.
+// The empty-input digest remains compatible with existing supervised jobs.
+func DigestWithInput(command string, input []byte) string {
+	if len(input) == 0 {
+		return Digest(command)
+	}
+	return Digest("nexus:job-command-input:v1\x00" + command + "\x00" + Digest(string(input)))
+}
+
+const MaxPrivateInput = 96 * 1024
+
 // Execute sends all command/output-bearing data over stdin. The shell command
 // contains only the fixed protocol implementation, never user input.
 func Execute(ctx context.Context, client *ssh.Client, request Request) (Snapshot, error) {
@@ -70,12 +82,13 @@ func Execute(ctx context.Context, client *ssh.Client, request Request) (Snapshot
 	}
 	switch request.Action {
 	case "start":
-		if len(request.Command) == 0 || len(request.Command) > 16384 || !utf8.ValidString(request.Command) || strings.ContainsRune(request.Command, 0) || Digest(request.Command) != request.Hash || request.RuntimeSeconds < 1 || request.RuntimeSeconds > 600 {
+		if len(request.Command) == 0 || len(request.Command) > 16384 || len(request.Input) > MaxPrivateInput || !utf8.ValidString(request.Command) || strings.ContainsRune(request.Command, 0) || DigestWithInput(request.Command, request.Input) != request.Hash || request.RuntimeSeconds < 1 || request.RuntimeSeconds > 600 {
 			return Snapshot{State: "not_started", NoDispatch: true, Detail: "invalid_command"}, errors.New("invalid supervised command")
 		}
 		request.Worker = base64.StdEncoding.EncodeToString(worker)
 	case "probe", "inspect", "cancel", "release":
 		request.Command = ""
+		request.Input = nil
 		request.Worker = ""
 	default:
 		return result, errors.New("unsupported supervisor action")
@@ -97,6 +110,9 @@ func Execute(ctx context.Context, client *ssh.Client, request Request) (Snapshot
 		return result, err
 	}
 	defer clear(payload)
+	if len(payload) > 200000 {
+		return Snapshot{State: "not_started", NoDispatch: true, Detail: "invalid_command"}, errors.New("supervisor request exceeds transport limit")
+	}
 	command := "/usr/bin/python3 -I -S -c '" + strings.ReplaceAll(remote, "'", `'"'"'`) + "'"
 	output, err := nexusssh.Run(ctx, client, command, strings.NewReader(string(payload)), 25*time.Second)
 	if err != nil {

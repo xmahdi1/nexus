@@ -1,5 +1,7 @@
 """Private per-run worker, launched by systemd rather than the SSH connection."""
 import ctypes
+import base64
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -7,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 
 directory = Path(__file__).parent
 request_file = directory / 'request.json'
@@ -66,7 +69,20 @@ def main():
         with os.fdopen(descriptor, 'wb') as file:
             file.write(request.pop('command').encode())
         status(state='running', startedAt=int(time.time()))
-        process = subprocess.Popen(['/bin/sh', str(script)], stdin=subprocess.DEVNULL, stdout=write_end, stderr=write_end, cwd='/', env={'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'HOME': '/root', 'LANG': 'C.UTF-8'})
+        with contextlib.ExitStack() as inputs:
+            encoded_input = request.pop('input', '')
+            child_input = subprocess.DEVNULL
+            if encoded_input:
+                payload = base64.b64decode(encoded_input, validate=True)
+                if len(payload) > 98304:
+                    raise ValueError('invalid private input')
+                # Anonymous private descriptor: no named credential artifact,
+                # pipe backpressure deadlock, inherited agent or environment.
+                child_input = inputs.enter_context(tempfile.TemporaryFile(dir=directory))
+                child_input.write(payload)
+                child_input.seek(0)
+                del payload, encoded_input
+            process = subprocess.Popen(['/bin/sh', str(script)], stdin=child_input, stdout=write_end, stderr=write_end, cwd='/', env={'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'HOME': '/root', 'LANG': 'C.UTF-8'})
         os.close(write_end)
         process.wait()
         while True:

@@ -1,6 +1,7 @@
 package jobsupervisor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -10,6 +11,54 @@ import (
 	"github.com/xmahdi1/nexus/internal/testssh"
 	"golang.org/x/crypto/ssh"
 )
+
+func TestPrivateInputIsBoundAndNeverSentInArgvOrInspection(t *testing.T) {
+	private := []byte("private-stdin-fixture")
+	command := "consume-fixed-private-input"
+	if DigestWithInput(command, nil) != Digest(command) || DigestWithInput(command, private) == Digest(command) || DigestWithInput(command, private) == DigestWithInput(command, []byte("changed")) {
+		t.Fatal("input identity is not bound")
+	}
+	for _, action := range []string{"start", "inspect"} {
+		t.Run(action, func(t *testing.T) {
+			client := testssh.Client(t, func(channel ssh.Channel, script string) uint32 {
+				if script == "uname -s" {
+					io.WriteString(channel, "Linux\n")
+					return 0
+				}
+				if strings.Contains(script, string(private)) || strings.Contains(script, command) {
+					t.Error("private context appeared in argv")
+				}
+				data, err := io.ReadAll(channel)
+				if err != nil {
+					t.Error(err)
+					return 1
+				}
+				var request Request
+				if err := json.Unmarshal(data, &request); err != nil {
+					t.Error(err)
+					return 1
+				}
+				if action == "start" && !bytes.Equal(request.Input, private) {
+					t.Error("private input missing")
+				}
+				if action == "inspect" && len(request.Input) != 0 {
+					t.Error("inspection transported credentials")
+				}
+				return 127
+			})
+			result, err := Execute(context.Background(), client, Request{Action: action, ID: strings.Repeat("a", 32), Hash: DigestWithInput(command, private), Command: command, Input: private, RuntimeSeconds: 1})
+			if err != nil || result.State != "unsupported" {
+				t.Fatal("unexpected result", err)
+			}
+		})
+	}
+	for _, input := range [][]byte{[]byte("changed"), bytes.Repeat([]byte{'x'}, MaxPrivateInput+1)} {
+		result, err := Execute(context.Background(), nil, Request{Action: "start", ID: strings.Repeat("a", 32), Hash: DigestWithInput(command, private), Command: command, Input: input, RuntimeSeconds: 1})
+		if err == nil || !result.NoDispatch {
+			t.Fatal("invalid private input reached transport")
+		}
+	}
+}
 
 func TestCommandUsesOnlyStdinAndMissingInterpreterIsNotDispatch(t *testing.T) {
 	for _, action := range []string{"start", "inspect"} {

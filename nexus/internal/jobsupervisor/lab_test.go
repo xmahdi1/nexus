@@ -61,15 +61,17 @@ func TestDisposableSystemdSupervisor(t *testing.T) {
 	for _, scenario := range []struct {
 		name, command, expected string
 		runtime                 int
+		input                   []byte
 	}{
-		{"completion", "printf supervised-output", "exited", 30},
-		{"stdin-is-eof", "if read value; then exit 9; fi; printf eof-ok", "exited", 30},
-		{"detached-descendant-completes", "setsid sh -c 'sleep 1' </dev/null >/dev/null 2>&1 & exit 0", "exited", 30},
-		{"failed-command", "exit 17", "failed", 30},
-		{"disconnect-and-cancel", "trap '' TERM; sleep 300 & setsid sh -c 'trap \"\" TERM; printf detached-ready; sleep 300' & wait", "cancelled", 60},
-		{"runtime-limit", "trap '' TERM; sleep 300 & wait", "timed_out", 2},
-		{"worker-crash", "kill -KILL \"$PPID\"; sleep 300", "interrupted", 30},
-		{"bounded-output", "python3 -c 'print(\"x\"*100000)'", "exited", 30},
+		{"completion", "printf supervised-output", "exited", 30, nil},
+		{"stdin-is-eof", "if read value; then exit 9; fi; printf eof-ok", "exited", 30, nil},
+		{"private-stdin", "python3 -c 'import sys; data=sys.stdin.buffer.read(); assert len(data)==98304 and data==b\"x\"*98304; print(\"private-input-ok\")'", "exited", 30, bytes.Repeat([]byte{'x'}, MaxPrivateInput)},
+		{"detached-descendant-completes", "setsid sh -c 'sleep 1' </dev/null >/dev/null 2>&1 & exit 0", "exited", 30, nil},
+		{"failed-command", "exit 17", "failed", 30, nil},
+		{"disconnect-and-cancel", "trap '' TERM; sleep 300 & setsid sh -c 'trap \"\" TERM; printf detached-ready; sleep 300' & wait", "cancelled", 60, nil},
+		{"runtime-limit", "trap '' TERM; sleep 300 & wait", "timed_out", 2, nil},
+		{"worker-crash", "kill -KILL \"$PPID\"; sleep 300", "interrupted", 30, nil},
+		{"bounded-output", "python3 -c 'print(\"x\"*100000)'", "exited", 30, nil},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			random := make([]byte, 16)
@@ -77,8 +79,8 @@ func TestDisposableSystemdSupervisor(t *testing.T) {
 				t.Fatal(err)
 			}
 			id := hex.EncodeToString(random)
-			digest := Digest(scenario.command)
-			result, err := Execute(context.Background(), client, Request{Action: "start", ID: id, Hash: digest, Command: scenario.command, RuntimeSeconds: scenario.runtime})
+			digest := DigestWithInput(scenario.command, scenario.input)
+			result, err := Execute(context.Background(), client, Request{Action: "start", ID: id, Hash: digest, Command: scenario.command, Input: scenario.input, RuntimeSeconds: scenario.runtime})
 			if err != nil || result.State != "accepted" {
 				t.Fatal("start failed", result, err)
 			}
@@ -133,6 +135,9 @@ func TestDisposableSystemdSupervisor(t *testing.T) {
 			}
 			if scenario.name == "completion" && result.Output != "supervised-output" {
 				t.Fatal("output lost", result)
+			}
+			if scenario.name == "private-stdin" && result.Output != "private-input-ok\n" {
+				t.Fatal("private stdin leaked or was lost")
 			}
 			if scenario.name == "bounded-output" && (len(result.Output) != 65536 || !result.Truncated) {
 				t.Fatal("output unbounded or truncation hidden", len(result.Output), result.Truncated)

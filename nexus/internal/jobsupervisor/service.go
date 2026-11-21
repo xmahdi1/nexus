@@ -25,6 +25,13 @@ func NewService(database *gorm.DB, key []byte, pool *nexusssh.Pool) *Service {
 // Dispatch requires a durable row created in the task's claim transaction. Its
 // CAS precedes all remote activity, so recovery never silently replays a start.
 func (service *Service) Dispatch(ctx context.Context, run models.SupervisedRun, command string) (Snapshot, error) {
+	return service.DispatchWithInput(ctx, run, command, nil)
+}
+
+// DispatchWithInput keeps credentials and structured execution context off argv,
+// environment variables and ordinary logs. Only internal typed adapters use it;
+// existing management handlers never accept arbitrary private stdin.
+func (service *Service) DispatchWithInput(ctx context.Context, run models.SupervisedRun, command string, input []byte) (Snapshot, error) {
 	now := time.Now().UTC()
 	claimed := service.DB.Model(&models.SupervisedRun{}).Where("id=? AND task_id=? AND server_id=? AND actor_id=? AND command_hash=? AND dispatch_started_at IS NULL AND cancel_requested_at IS NULL AND state='prepared'", run.ID, run.TaskID, run.ServerID, run.ActorID, run.CommandHash).Updates(map[string]any{"dispatch_started_at": now, "state": "dispatching"})
 	if claimed.Error != nil {
@@ -39,11 +46,11 @@ func (service *Service) Dispatch(ctx context.Context, run models.SupervisedRun, 
 		}
 		return service.Inspect(ctx, run, "inspect")
 	}
-	if Digest(command) != run.CommandHash {
+	if DigestWithInput(command, input) != run.CommandHash || len(input) > MaxPrivateInput {
 		result := Snapshot{State: "not_started", NoDispatch: true, Detail: "command_identity_changed"}
 		return result, service.Save(run, result)
 	}
-	return service.call(ctx, run, Request{Action: "start", ID: run.ID, Hash: run.CommandHash, Command: command, RuntimeSeconds: 600})
+	return service.call(ctx, run, Request{Action: "start", ID: run.ID, Hash: run.CommandHash, Command: command, Input: input, RuntimeSeconds: 600})
 }
 
 func (service *Service) Inspect(ctx context.Context, run models.SupervisedRun, action string) (Snapshot, error) {
