@@ -17,6 +17,16 @@ func TestActionsRejectShellInputsAndPinLocalEngine(t *testing.T) {
 		}
 	}
 	for _, spec := range Catalog() {
+		if strings.HasPrefix(spec.ID, "ansible-environment-") {
+			command, hash, err := Build(spec.ID, "", "")
+			if err != nil || len(hash) != 64 || strings.Contains(command, "docker.sock") {
+				t.Fatal("unbound environment action", spec.ID, err)
+			}
+			if _, _, err := Build(spec.ID, "/tmp/override", ""); err == nil {
+				t.Fatal("caller environment path accepted")
+			}
+			continue
+		}
 		p, cid := "", "abcdef123456"
 		if strings.HasPrefix(spec.ID, "compose-") {
 			p, cid = "/tmp/compose '$(printf unsafe)'/app.yml", ""

@@ -64,7 +64,7 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 	execH := handlers.NewExecHandler(db, cfg.EncryptionKey, pool)
 	tasksH := handlers.NewTasksHandler(db, cfg.JobSupervisionEnabled)
 	runsH := handlers.NewSupervisedRunsHandler(db, cfg.EncryptionKey, pool)
-	operationsH := handlers.NewOperationsHandler(operations.New(db, cfg.EncryptionKey, pool, auth.NewService(db, cfg), cfg.OperationSupervisionEnabled))
+	operationsH := handlers.NewOperationsHandler(operations.New(db, cfg.EncryptionKey, pool, auth.NewService(db, cfg), cfg.OperationSupervisionEnabled, cfg.AutomationEnabled))
 	fwH := handlers.NewFirewallHandler(db, []byte(cfg.EncryptionKey), pool)
 
 	r.With(nexusMW.LoginRateLimit).Post("/api/auth/login", authH.Login)

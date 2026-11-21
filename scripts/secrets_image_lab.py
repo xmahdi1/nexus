@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline schema-8 → schema-15 image upgrade and matching-old-image rollback.
+"""Offline schema-8 → schema-16 image upgrade and matching-old-image rollback.
 Requires local Docker, bcrypt, cryptography, and an already-local schema-8 image.
 Never starts application workers, publishes ports, or reads a deployment .env.
 """
@@ -55,7 +55,7 @@ with tempfile.TemporaryDirectory(prefix='nexus-secret-image-lab-') as directory:
     cli(args.new_image,'db-migrate','--from-env','/data/fixture.db')
     with sqlite3.connect(path) as database:
         assert database.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
-        assert database.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]==15
+        assert database.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]==16
         assert 'vars_json' not in [row[1] for row in database.execute('PRAGMA table_info(deployed_apps)')]
         app=database.execute("SELECT id,server_id,name,status,vars_enc FROM deployed_apps WHERE id='app'").fetchone()
         assert app[2:4]==('preserved','running')

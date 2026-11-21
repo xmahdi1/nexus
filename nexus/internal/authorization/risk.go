@@ -14,7 +14,7 @@ func Risk(policy Policy) string {
 	}
 	for _, p := range policy.Permissions {
 		switch p {
-		case "secrets.reveal", "docker.exec", "servers.execute", "files.write", "files.delete", "compose.write", "deployments.execute", "firewall.manage", "proxy.manage":
+		case "ansible.environment.manage", "secrets.reveal", "docker.exec", "servers.execute", "files.write", "files.delete", "compose.write", "deployments.execute", "firewall.manage", "proxy.manage":
 			return "high"
 		}
 	}

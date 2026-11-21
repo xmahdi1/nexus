@@ -104,6 +104,40 @@ func TestRequestIdentitySurvivesLostAcknowledgementWithoutReplay(t *testing.T) {
 		t.Fatal("unresolved host admitted another command", err)
 	}
 }
+
+func TestAnsibleEnvironmentRequiresOptInAndSeparateGrants(t *testing.T) {
+	s, a, calls, _ := operationFixture(t)
+	id := strings.Repeat("d", 32)
+	if _, err := s.Start(context.Background(), a.User.ID, a.Session.ID, "dev", id, "ansible-environment-install", "", ""); !errors.Is(err, authorization.ErrDenied) {
+		t.Fatal("ungranted environment action admitted", err)
+	}
+	grant := authorization.Grant{ID: "ansible-environment-grant", PrincipalID: a.User.ID, PrincipalKind: "legacy", RoleID: "ansible-environment", ScopeType: "server", ScopeID: "dev", CreatedBy: a.User.ID, CreatedAt: time.Now().UTC()}
+	if err := s.DB.Create(&grant).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Start(context.Background(), a.User.ID, a.Session.ID, "dev", id, "ansible-environment-install", "", ""); !errors.Is(err, authorization.ErrDenied) {
+		t.Fatal("disabled automation admitted action", err)
+	}
+	s.AutomationEnabled = true
+	run, err := s.Start(context.Background(), a.User.ID, a.Session.ID, "dev", id, "ansible-environment-install", "", "")
+	if err != nil || !s.Allowed(run) || calls.Load() != 1 {
+		t.Fatal("authorized environment action failed", err)
+	}
+	if _, err := s.Start(context.Background(), a.User.ID, a.Session.ID, "dev", id, "ansible-environment-install", "", ""); err != nil || calls.Load() != 1 {
+		t.Fatal("environment installation replayed", err)
+	}
+	s.AutomationEnabled = false
+	if s.Allowed(run) {
+		t.Fatal("feature removal retained authority")
+	}
+	s.AutomationEnabled = true
+	if err := s.DB.Delete(&grant).Error; err != nil {
+		t.Fatal(err)
+	}
+	if s.Allowed(run) {
+		t.Fatal("environment grant removal retained authority")
+	}
+}
 func TestRestartReconciliationCancelsRevokedAndDisabledOperations(t *testing.T) {
 	for _, reason := range []string{"session", "grant", "disabled", "cancel_requested"} {
 		t.Run(reason, func(t *testing.T) {

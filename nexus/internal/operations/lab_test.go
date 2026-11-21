@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xmahdi1/nexus/internal/authorization"
 	nexuscrypto "github.com/xmahdi1/nexus/internal/crypto"
 	"github.com/xmahdi1/nexus/internal/models"
 	nexusssh "github.com/xmahdi1/nexus/internal/ssh"
@@ -114,6 +115,24 @@ func TestInteractiveVMRecoveryAndSessionRevocation(t *testing.T) {
 	observation, err := service.Observe(ctx, run, "cached")
 	if err != nil || observation.Output != "adapter-complete" || !observation.Terminal() {
 		t.Fatal("saved adapter result missing", err)
+	}
+	// The environment action uses the same real durable unit/cgroup protocol.
+	// Older guest Python is reported as unsupported without creating an account.
+	if err := fixture.DB.Create(&authorization.Grant{ID: "environment-lab", PrincipalID: access.User.ID, PrincipalKind: "legacy", RoleID: "ansible-environment", ScopeType: "server", ScopeID: "dev", CreatedBy: access.User.ID, CreatedAt: time.Now().UTC()}).Error; err != nil {
+		t.Fatal(err)
+	}
+	service.AutomationEnabled = true
+	envRun, err := service.Start(ctx, access.User.ID, access.Session.ID, "dev", strings.Repeat("e", 32), "ansible-environment-health", "", "")
+	if err != nil {
+		t.Fatal("environment health dispatch", err)
+	}
+	envRun = wait(envRun.ID, "exited")
+	envObservation, err := service.Observe(ctx, envRun, "cached")
+	if err != nil || (!strings.Contains(envObservation.Output, `"state": "unsupported"`) && !strings.Contains(envObservation.Output, `"state": "absent"`)) {
+		t.Fatal("environment prerequisites were not reported", err)
+	}
+	if _, err := service.Observe(ctx, envRun, "release"); err != nil {
+		t.Fatal(err)
 	}
 	// A replacement controller may observe/reuse identity, but never dispatch it.
 	pool.Remove("dev")

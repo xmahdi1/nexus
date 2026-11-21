@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"github.com/xmahdi1/nexus/internal/ansibleenv"
 	"path"
 	"regexp"
 	"strings"
@@ -18,6 +19,10 @@ type Spec struct {
 }
 
 var catalog = []Spec{
+	{"ansible-environment-install", "ansible/environment/install", "Install Ansible environment", strings.Fields("ansible.environment.manage servers.execute secrets.use"), "ansible.environment.read"},
+	{"ansible-environment-update", "ansible/environment/update", "Update Ansible environment", strings.Fields("ansible.environment.manage servers.execute secrets.use"), "ansible.environment.read"},
+	{"ansible-environment-health", "ansible/environment/health", "Check Ansible environment", strings.Fields("ansible.environment.read servers.execute secrets.use"), "ansible.environment.read"},
+	{"ansible-environment-remove", "ansible/environment/remove", "Remove Ansible environment", strings.Fields("ansible.environment.manage servers.execute secrets.use"), "ansible.environment.read"},
 	{"compose-up", "compose/up", "Start Compose services", strings.Fields("compose.write deployments.execute servers.execute secrets.use"), "compose.read"},
 	{"compose-down", "compose/down", "Stop Compose services", strings.Fields("compose.write deployments.execute servers.execute secrets.use"), "compose.read"},
 	{"container-start", "containers/{cid}/start", "Start container", strings.Fields("docker.manage servers.execute secrets.use"), "docker.read"},
@@ -59,6 +64,17 @@ func Build(id, composePath, cid string) (command, targetHash string, err error) 
 	const prefix = `export PATH="$PATH:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/bin:/sbin"; `
 	const docker = "docker --host unix:///var/run/docker.sock "
 	target := ""
+	if strings.HasPrefix(spec.ID, "ansible-environment-") {
+		if composePath != "" || cid != "" {
+			return "", "", ErrInput
+		}
+		command, err := ansibleenv.Command(strings.TrimPrefix(spec.ID, "ansible-environment-"))
+		if err != nil {
+			return "", "", err
+		}
+		digest := sha256.Sum256([]byte(command))
+		return command, hex.EncodeToString(digest[:]), nil
+	}
 	if strings.HasPrefix(spec.ID, "compose-") {
 		if cid != "" || len(composePath) > 4096 || !path.IsAbs(composePath) || path.Clean(composePath) != composePath || strings.ContainsAny(composePath, "\r\n\x00") {
 			return "", "", ErrInput

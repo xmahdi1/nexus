@@ -4,6 +4,7 @@ package operations
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,16 +28,18 @@ type controller interface {
 	Save(models.SupervisedRun, jobsupervisor.Snapshot) error
 }
 type Service struct {
-	DB            *gorm.DB
-	Sessions      *auth.Service
-	Enabled       bool
-	newController func(func() bool) controller
-	active        sync.Map
-	slots         chan struct{}
+	DB                *gorm.DB
+	Sessions          *auth.Service
+	Enabled           bool
+	AutomationEnabled bool
+	newController     func(func() bool) controller
+	active            sync.Map
+	slots             chan struct{}
 }
 
-func New(database *gorm.DB, key []byte, pool *nexusssh.Pool, sessions *auth.Service, enabled bool) *Service {
+func New(database *gorm.DB, key []byte, pool *nexusssh.Pool, sessions *auth.Service, enabled bool, automation ...bool) *Service {
 	s := &Service{DB: database, Sessions: sessions, Enabled: enabled, slots: make(chan struct{}, 4)}
+	s.AutomationEnabled = len(automation) == 1 && automation[0]
 	s.newController = func(guard func() bool) controller {
 		job := jobsupervisor.NewService(database, key, pool)
 		job.Guard = guard
@@ -53,6 +56,9 @@ func (s *Service) Allowed(run models.SupervisedRun) bool {
 	}
 	spec, ok := remoteaction.Find(run.Action)
 	if !ok {
+		return false
+	}
+	if strings.HasPrefix(spec.ID, "ansible-environment-") && !s.AutomationEnabled {
 		return false
 	}
 	access, err := s.Sessions.AccessForSession(run.SourceSessionID, run.ActorID)

@@ -119,7 +119,7 @@ func main() {
 
 	sched := scheduler.New(database, []byte(cfg.EncryptionKey), pool, cfg.JobSupervisionEnabled)
 	sched.Start()
-	operations.New(database, cfg.EncryptionKey, pool, auth.NewService(database, cfg), cfg.OperationSupervisionEnabled).Run(context.Background())
+	operations.New(database, cfg.EncryptionKey, pool, auth.NewService(database, cfg), cfg.OperationSupervisionEnabled, cfg.AutomationEnabled).Run(context.Background())
 
 	router := api.NewRouter(database, cfg, pool, mon)
 	handler := mountFrontend(router, cfg)
