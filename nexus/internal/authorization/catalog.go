@@ -79,6 +79,8 @@ func init() {
 		register("POST", "/api/servers/{id}/vault/admin/"+op.ID, "server", strings.Join(op.Permissions, " "))
 	}
 	register("GET", "/api/servers/{id}/inventory", "server", "inventory.read")
+	register("GET", "/api/servers/{id}/inventory/relationships", "server", "inventory.read")
+	register("GET", "/api/servers/{id}/inventory/history", "server", "inventory.read")
 	register("POST", "/api/servers/{id}/inventory/discover", "server", "inventory.discover secrets.use")
 	self("POST", "/api/auth/step-up")
 	register("PUT", "/api/server-groups/{gid}/policy", "global", "roles.manage groups.manage")

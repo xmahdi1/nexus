@@ -117,6 +117,8 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 		}
 		inventoryH := handlers.NewInventoryHandler(db, cfg, pool)
 		r.Get("/api/servers/{id}/inventory", inventoryH.Read)
+		r.Get("/api/servers/{id}/inventory/relationships", inventoryH.Relationships)
+		r.Get("/api/servers/{id}/inventory/history", inventoryH.History)
 		r.With(nexusMW.CredentialRateLimit).Post("/api/servers/{id}/inventory/discover", inventoryH.Discover)
 		r.With(nexusMW.CredentialRateLimit).Post("/api/auth/step-up", policyH.StepUp)
 		r.With(nexusMW.CredentialRateLimit).Put("/api/server-groups/{gid}/policy", policyH.SetGroupPolicy)

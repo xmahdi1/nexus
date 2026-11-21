@@ -24,6 +24,28 @@ func TestInventoryFeatureFlagScopeAndNoImplicitRemoteCollection(t *testing.T) {
 	if response := policyRequest(enabled, cookie, "GET", "/api/servers/dev/inventory?limit=10000", ""); response.Code != 400 {
 		t.Fatal("unbounded page")
 	}
+	for _, path := range []string{"history", "relationships"} {
+		if response := policyRequest(router, cookie, "GET", "/api/servers/dev/inventory/"+path, ""); response.Code != 404 {
+			t.Fatal("feature flag bypass", path, response.Code)
+		}
+		if response := policyRequest(enabled, cookie, "GET", "/api/servers/dev/inventory/"+path, ""); response.Code != 200 {
+			t.Fatal("reader denied", path, response.Code, response.Body.String())
+		}
+		if response := policyRequest(enabled, cookie, "GET", "/api/servers/prod/inventory/"+path, ""); response.Code != 404 {
+			t.Fatal("cross-server data", path, response.Code)
+		}
+		if response := policyRequest(enabled, cookie, "GET", "/api/servers/dev/inventory/"+path+"?limit=10000", ""); response.Code != 400 {
+			t.Fatal("unbounded page", path, response.Code)
+		}
+	}
+	if response := policyRequest(enabled, cookie, "GET", "/api/servers/dev/inventory?after=bad", ""); response.Code != 400 {
+		t.Fatal("invalid resource cursor accepted", response.Code)
+	}
+	for _, query := range []string{"history?before=-1", "history?resourceId=bad", "relationships?after=bad"} {
+		if response := policyRequest(enabled, cookie, "GET", "/api/servers/dev/inventory/"+query, ""); response.Code != 400 {
+			t.Fatal("invalid cursor accepted", query, response.Code)
+		}
+	}
 	var count int64
 	database.Model(&inventory.Run{}).Count(&count)
 	if count != 0 {
