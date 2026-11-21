@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"github.com/xmahdi1/nexus/internal/auth"
 	"github.com/xmahdi1/nexus/internal/authorization"
+	"github.com/xmahdi1/nexus/internal/automation"
 	"net/http"
 	"strings"
 
@@ -39,7 +40,8 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 	r.Use(middleware.CleanPath)
 	r.Use(nexusMW.Security(cfg))
 	r.Use(corsMiddleware)
-	r.Use(nexusMW.Management(auth.NewService(db, cfg), authorization.New(db)))
+	ansibleService := &automation.InventoryService{DB: db, Sessions: auth.NewService(db, cfg)}
+	r.Use(nexusMW.Management(auth.NewService(db, cfg), authorization.New(db), nexusMW.InventorySession(ansibleService, cfg.AutomationEnabled)))
 
 	r.Get("/health/live", liveness)
 	r.Get("/health/ready", readiness(db))
@@ -75,6 +77,13 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 	r.With(nexusMW.LoginRateLimit).Post("/api/auth/reset/mfa/confirm", accountsH.ResetMFAConfirm)
 
 	r.Group(func(r chi.Router) {
+		ansibleH := &handlers.AnsibleInventoryHandler{Service: ansibleService, Enabled: cfg.AutomationEnabled}
+		r.Get("/api/automation/ansible/groups", ansibleH.Groups)
+		r.Get("/api/automation/ansible/inventory", ansibleH.Inventory)
+		r.Get("/api/automation/ansible/preview", ansibleH.Preview)
+		r.Get("/api/automation/ansible/tokens", ansibleH.List)
+		r.With(nexusMW.CredentialRateLimit).Post("/api/automation/ansible/tokens", ansibleH.Issue)
+		r.Delete("/api/automation/ansible/tokens/{tokenId}", ansibleH.Revoke)
 
 		r.Post("/api/auth/logout", authH.Logout)
 		r.Get("/api/users", accountsH.Users)
@@ -88,7 +97,7 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 		r.Get("/api/auth/me", authH.Me)
 		r.Get("/api/features", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]bool{"inventory": cfg.InventoryEnabled, "jobSupervision": cfg.JobSupervisionEnabled, "operationSupervision": cfg.OperationSupervisionEnabled, "vault": cfg.VaultEnabled})
+			json.NewEncoder(w).Encode(map[string]bool{"automation": cfg.AutomationEnabled, "inventory": cfg.InventoryEnabled, "jobSupervision": cfg.JobSupervisionEnabled, "operationSupervision": cfg.OperationSupervisionEnabled, "vault": cfg.VaultEnabled})
 		})
 		for _, action := range remoteaction.Catalog() {
 			r.Post("/api/servers/{id}/operations/"+action.Route, operationsH.Start(action.ID))

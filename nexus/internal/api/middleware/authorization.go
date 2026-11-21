@@ -73,9 +73,10 @@ func Authorize(service *authorization.Service) func(http.Handler) http.Handler {
 					return
 				}
 			}
+			previousCheck := access.CheckAuthorization
 			access.CheckAuthorization = func() bool {
 				protected, err := service.Protected(server)
-				return err == nil && (!protected || authorization.Risk(policy) == "low" || access.RecentMFA()) && service.Allowed(access.User.ID, policy, server)
+				return (previousCheck == nil || previousCheck()) && err == nil && (!protected || authorization.Risk(policy) == "low" || access.RecentMFA()) && service.Allowed(access.User.ID, policy, server)
 			}
 			bound := authorization.Bind(r, service, access.User.ID)
 			if audited(policy) {
@@ -90,10 +91,14 @@ func Authorize(service *authorization.Service) func(http.Handler) http.Handler {
 // Management guards the entire management URL surface, including future routes
 // accidentally registered outside the protected group. Only the two explicit
 // login endpoints are public; unknown actions never reach a handler.
-func Management(sessions *auth.Service, policy *authorization.Service) func(http.Handler) http.Handler {
+func Management(sessions *auth.Service, policy *authorization.Service, inventory ...func(http.Handler) http.Handler) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		protected := RequireSession(sessions)(Authorize(policy)(next))
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "GET" && r.URL.Path == "/api/automation/ansible/inventory" && len(inventory) == 1 {
+				inventory[0](Authorize(policy)(next)).ServeHTTP(w, r)
+				return
+			}
 			public := authorization.Public(r.Method, r.URL.Path)
 			if public || (!strings.HasPrefix(r.URL.Path, "/api/") && !strings.HasPrefix(r.URL.Path, "/ws/")) {
 				next.ServeHTTP(w, r)
