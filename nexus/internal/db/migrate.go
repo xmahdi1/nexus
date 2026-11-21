@@ -29,6 +29,7 @@ var schemaMigrations = []migration{
 	{12, "vault_connections", migrations.VaultConnections},
 	{13, "interactive_operations", migrations.InteractiveOperations},
 	{14, "inventory_details", migrations.InventoryDetails},
+	{15, "ansible_inventory", migrations.AnsibleInventory},
 }
 
 type schemaMigration struct {

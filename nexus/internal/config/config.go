@@ -13,6 +13,7 @@ import (
 )
 
 type Config struct {
+	AutomationEnabled           bool
 	ACME                        ACMEConfig
 	InventoryEnabled            bool
 	VaultEnabled                bool
@@ -76,6 +77,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	return &Config{
+		AutomationEnabled:           os.Getenv("NEXUS_ENABLE_AUTOMATION") == "true",
 		ACME:                        acme,
 		VaultEnabled:                os.Getenv("NEXUS_ENABLE_VAULT") == "true",
 		InventoryEnabled:            os.Getenv("NEXUS_ENABLE_INVENTORY") == "true",

@@ -36,6 +36,7 @@ func TestRotationRecoverySet(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
+		"INSERT INTO ansible_inventory_tokens(id,token_hash,actor_id,session_id,group_id,created_at,expires_at) VALUES('inventory','hash','u','session','g',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",
 		"INSERT INTO auth_sessions(id,principal_id,token_hash,credential_epoch,created_at,last_used_at,expires_at,device_label,client_ip) VALUES('session','u','session-token','epoch',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'fixture','127.0.0.1')",
 		"INSERT INTO account_invitations(id,user_id,token_hash,inviter_id,created_at,expires_at) VALUES('invite','u','invite-token','u',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",
 		"INSERT INTO account_resets(id,user_id,token_hash,kind,credential_epoch,requested_by,reason,created_at,expires_at) VALUES('reset','u','reset-token','mfa','epoch','u','fixture',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",
@@ -95,7 +96,7 @@ func TestRotationRecoverySet(t *testing.T) {
 	if count != 1 {
 		t.Fatal("source authority changed")
 	}
-	for _, table := range []string{"auth_sessions", "account_invitations", "account_resets", "account_reset_enrollments"} {
+	for _, table := range []string{"auth_sessions", "account_invitations", "account_resets", "account_reset_enrollments", "ansible_inventory_tokens"} {
 		if err := rotated.Table(table).Count(&count).Error; err != nil || count != 0 {
 			t.Fatal("copied authority retained", table, err)
 		}

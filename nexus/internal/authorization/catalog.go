@@ -12,13 +12,14 @@ const MonitorPrincipal = "system-monitor"
 // These are role templates, not evaluator shortcuts. Runtime decisions use the
 // versioned role_permissions rows and validated resource scopes.
 var RoleTemplates = map[string][]string{
-	"viewer":        strings.Fields(`servers.read metrics.read docker.read network.read firewall.read proxy.read inventory.read secrets.use`),
-	"operator":      strings.Fields(`servers.read metrics.read docker.read network.read firewall.read proxy.read inventory.read secrets.use docker.manage`),
-	"admin":         strings.Fields(`servers.read servers.create servers.update servers.delete servers.connect metrics.read docker.read docker.manage docker.remove network.read firewall.read firewall.manage proxy.read proxy.manage inventory.read inventory.discover inventory.edit inventory.export deployments.read deployments.approve jobs.read jobs.create jobs.execute jobs.cancel jobs.manage secrets.metadata.read secrets.create secrets.use secrets.rotate users.read users.manage roles.manage sessions.manage audit.read settings.manage integrations.manage services.read services.manage templates.read templates.manage groups.read groups.manage`),
-	"host-control":  strings.Fields(`servers.terminal servers.execute files.list files.read files.write files.delete docker.exec compose.read compose.write deployments.execute deployments.rollback secrets.use servers.read`),
-	"log-reader":    strings.Fields(`logs.read servers.read secrets.use`),
-	"secret-reader": strings.Fields(`secrets.reveal secrets.metadata.read`),
-	"collector":     strings.Fields(`notifications.send servers.read servers.connect metrics.read docker.read proxy.read network.read inventory.read secrets.use`),
+	"ansible-inventory": strings.Fields(`servers.read ansible.inventory.read`),
+	"viewer":            strings.Fields(`servers.read metrics.read docker.read network.read firewall.read proxy.read inventory.read secrets.use`),
+	"operator":          strings.Fields(`servers.read metrics.read docker.read network.read firewall.read proxy.read inventory.read secrets.use docker.manage`),
+	"admin":             strings.Fields(`servers.read servers.create servers.update servers.delete servers.connect metrics.read docker.read docker.manage docker.remove network.read firewall.read firewall.manage proxy.read proxy.manage inventory.read inventory.discover inventory.edit inventory.export deployments.read deployments.approve jobs.read jobs.create jobs.execute jobs.cancel jobs.manage secrets.metadata.read secrets.create secrets.use secrets.rotate users.read users.manage roles.manage sessions.manage audit.read settings.manage integrations.manage services.read services.manage templates.read templates.manage groups.read groups.manage`),
+	"host-control":      strings.Fields(`servers.terminal servers.execute files.list files.read files.write files.delete docker.exec compose.read compose.write deployments.execute deployments.rollback secrets.use servers.read`),
+	"log-reader":        strings.Fields(`logs.read servers.read secrets.use`),
+	"secret-reader":     strings.Fields(`secrets.reveal secrets.metadata.read`),
+	"collector":         strings.Fields(`notifications.send servers.read servers.connect metrics.read docker.read proxy.read network.read inventory.read secrets.use`),
 }
 var known = func() map[string]bool {
 	m := map[string]bool{}
@@ -50,6 +51,12 @@ func self(method, path string) {
 	Policies = append(Policies, Policy{Method: method, Path: path, Self: true})
 }
 func init() {
+	register("GET", "/api/automation/ansible/groups", "collection", "ansible.inventory.read servers.read")
+	register("GET", "/api/automation/ansible/inventory", "collection", "ansible.inventory.read servers.read")
+	register("GET", "/api/automation/ansible/preview", "collection", "ansible.inventory.read servers.read")
+	register("GET", "/api/automation/ansible/tokens", "collection", "ansible.inventory.read servers.read")
+	register("POST", "/api/automation/ansible/tokens", "collection", "ansible.inventory.read servers.read")
+	register("DELETE", "/api/automation/ansible/tokens/{tokenId}", "collection", "ansible.inventory.read servers.read")
 	self("GET", "/api/features")
 	for _, action := range remoteaction.Catalog() {
 		register("POST", "/api/servers/{id}/operations/"+action.Route, "server", strings.Join(action.Permissions, " "))

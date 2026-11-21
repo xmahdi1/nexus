@@ -83,7 +83,7 @@ func RotateRecoverySet(source, destination string, oldKey []byte) (resultErr err
 			}
 		}
 		// Revoke bearer and pending credential-change authority in the copy only.
-		for _, table := range []string{"auth_sessions", "auth_challenges", "account_reset_enrollments", "account_resets", "account_invitations"} {
+		for _, table := range []string{"auth_sessions", "auth_challenges", "account_reset_enrollments", "account_resets", "account_invitations", "ansible_inventory_tokens"} {
 			if err := tx.Exec("DELETE FROM " + table).Error; err != nil {
 				return err
 			}
