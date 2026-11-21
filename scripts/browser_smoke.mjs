@@ -33,6 +33,29 @@ try{
  await viewerPage.goto(url+'/servers/dev');await viewerPage.getByRole('button',{name:'Inventory',exact:true}).click();await viewerPage.getByRole('heading',{name:'Observed inventory',exact:true}).waitFor()
  response=await api(viewer,'/servers/dev/inventory/discover',{});assert.equal(response.status(),403)
  response=await api(owner,'/servers/dev/inventory/discover',{});assert.equal(response.status(),200);assert.equal((await response.json()).status,'failed')
+ // Public allowlisted observation summaries and per-resource history, UI only.
+ const serviceResource='d'.repeat(64),hostResource='f'.repeat(64)
+ const serviceDetails={unit:'ssh.service',load:'loaded',active:'failed',sub:'failed'}
+ await viewerPage.route('**/api/servers/dev/inventory',route=>route.fulfill({status:200,json:{items:[{id:serviceResource,kind:'service',displayName:'ssh.service',source:'systemd',dataState:'fresh',lastVerifiedAt:new Date().toISOString(),details:serviceDetails}],runs:[],changes:[],next:''}}))
+ await viewerPage.route('**/api/servers/dev/inventory?**',route=>route.fulfill({status:200,json:{items:[{id:serviceResource,kind:'service',displayName:'ssh.service',source:'systemd',dataState:'fresh',lastVerifiedAt:new Date().toISOString(),details:serviceDetails}],runs:[],changes:[],next:''}}))
+ await viewerPage.route('**/api/servers/dev/inventory/relationships?**',route=>route.fulfill({status:200,json:{items:[{id:'c'.repeat(64),serverId:'dev',sourceId:hostResource,targetId:serviceResource,sourceName:'fixture-host',targetName:'ssh.service',kind:'manages',source:'systemd',dataState:'fresh',firstSeenAt:new Date().toISOString(),lastVerifiedAt:new Date().toISOString()}],next:''}}))
+ let filteredHistory=0
+ await viewerPage.route('**/api/servers/dev/inventory/history?**',route=>{
+  const query=new URL(route.request().url()).searchParams
+  if(query.get('resourceId')===serviceResource)filteredHistory++
+  const older=query.get('before')==='9'
+  return route.fulfill({status:200,json:{items:[{id:older?8:9,serverId:'dev',resourceId:serviceResource,runId:'fixture-scan',kind:older?'observed':'updated',at:new Date().toISOString(),...(older?{}:{before:{name:'ssh.service',details:{...serviceDetails,active:'active',sub:'running'}}}),after:{name:'ssh.service',details:serviceDetails}}],next:older?'':'9'}})
+ })
+ await viewerPage.getByRole('button',{name:'Refresh records',exact:true}).click()
+ await viewerPage.getByRole('cell',{name:'manages',exact:true}).waitFor()
+ await viewerPage.getByRole('button',{name:'Show history for ssh.service',exact:true}).click()
+ const inventoryHistory=viewerPage.getByLabel('Inventory change history',{exact:true})
+ await inventoryHistory.getByRole('heading',{name:'Change history · ssh.service',exact:true}).waitFor()
+ await inventoryHistory.getByText('Compare observed properties',{exact:true}).click()
+ await inventoryHistory.getByText('"active": "active"',{exact:false}).waitFor()
+ await inventoryHistory.getByRole('button',{name:'Load older changes',exact:true}).click()
+ await inventoryHistory.getByText(/observed · ssh.service/).waitFor()
+ assert.equal(filteredHistory,2)
 
  // UI-only fixture responses verify confirmations without running remote rules.
  const firewall={status:'active',available:true,rules:[{number:1,to:'22/tcp',action:'ALLOW',from:'Anywhere'}],ports:[]}
