@@ -6,7 +6,7 @@ require (
 	github.com/go-chi/chi/v5 v5.5.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/joho/godotenv v1.5.1
-	github.com/mattn/go-sqlite3 v1.14.22
+	github.com/mattn/go-sqlite3 v1.14.53
 	github.com/pkg/sftp v1.13.10
 	github.com/pquerna/otp v1.5.0
 	golang.org/x/crypto v0.56.0
