@@ -12,6 +12,7 @@ const router = createRouter({
         {path: '/servers', component: () => import('@/views/ServersView.vue'), meta: {requiresAuth: true}},
         {path: '/servers/:id', component: () => import('@/views/ServerDetailView.vue'), meta: {requiresAuth: true}},
         {path: '/services', component: () => import('@/views/ServicesView.vue'), meta: {requiresAuth: true}},
+        {path: '/automation', component: () => import('@/views/AutomationView.vue'), meta: {requiresAuth: true}},
         {path: '/settings', component: () => import('@/views/SettingsView.vue'), meta: {requiresAuth: true}},
         {path: '/:pathMatch(.*)*', component: () => import('@/views/NotFoundView.vue')},
     ],

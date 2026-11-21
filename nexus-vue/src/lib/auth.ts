@@ -3,6 +3,7 @@ import {api} from './api'
 let authenticated = false
 let capabilities: {global:Record<string,boolean>;servers:Record<string,string[]>} = {global:{},servers:{}}
 export function can(permission:string,serverId=''):boolean { return !!capabilities.global[permission] || !!(serverId && capabilities.servers[serverId]?.includes(permission)) }
+export function canAny(permission:string):boolean { return can(permission) || Object.values(capabilities.servers).some(values=>values.includes(permission)) }
 // Remove the obsolete hint; it is never used to decide authentication.
 try { if (typeof localStorage !== 'undefined') localStorage.removeItem('nexus_authed') } catch { /* Storage is optional. */ }
 export function isAuthed(): boolean { return authenticated }

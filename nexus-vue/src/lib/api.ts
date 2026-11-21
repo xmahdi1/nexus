@@ -1,3 +1,5 @@
+export interface AnsibleInventoryToken {id:string;groupId:string;createdAt:string;expiresAt:string}
+export interface AnsibleInventoryPreview {revision:string;groups:Record<string,string>;inventory:{_meta:{hostvars:Record<string,{ansible_host:string;ansible_port:number;ansible_user:string;nexus_server_id:string}>}}}
 export interface InventoryRelationship {id:string;serverId:string;sourceId:string;targetId:string;sourceName:string;targetName:string;kind:string;source:string;dataState:string;firstSeenAt:string;lastVerifiedAt:string}
 export interface InventoryChange {id:number;serverId:string;runId:string;resourceId:string;kind:string;at:string;before?:{name:string;details:unknown};after?:{name:string;details:unknown}}
 export interface AccountUser {
@@ -334,6 +336,13 @@ function responseError(res:Response,data:any):Error {
 }
 
 export const api = {
+ ansible: {
+  groups:()=>request<Array<{id:string;name:string}>>('GET','/automation/ansible/groups'),
+  preview:(groupId:string)=>request<AnsibleInventoryPreview>('GET',`/automation/ansible/preview?groupId=${encodeURIComponent(groupId)}`),
+  tokens:()=>request<AnsibleInventoryToken[]>('GET','/automation/ansible/tokens'),
+  issue:(groupId:string,ttlSeconds:number)=>request<AnsibleInventoryToken & {token:string}>('POST','/automation/ansible/tokens',{groupId,ttlSeconds}),
+  revoke:(id:string)=>request<void>('DELETE',`/automation/ansible/tokens/${encodeURIComponent(id)}`),
+ },
  operations:{
   start:(sid:string,action:ServerOperation,requestId:string,target:{path?:string;cid?:string})=>{
    const compose=action.startsWith('compose-')
@@ -357,7 +366,7 @@ export const api = {
   remove:(id:string)=>request<void>('DELETE',`/servers/${encodeURIComponent(id)}/vault`),
   inspect:(id:string,token:string)=>request<VaultObservation>('POST',`/servers/${encodeURIComponent(id)}/vault/inspect`,{token}),
  },
- features:()=>request<{inventory:boolean;jobSupervision:boolean;operationSupervision:boolean;vault:boolean}>('GET','/features'),
+ features:()=>request<{automation:boolean;inventory:boolean;jobSupervision:boolean;operationSupervision:boolean;vault:boolean}>('GET','/features'),
  inventory:{
  read:(id:string,after='')=>request<{items:Array<{id:string;kind:string;displayName:string;source:string;dataState:string;lastVerifiedAt:string;details:unknown}>;runs:Array<{id:string;status:string;warning:string;startedAt:string}>;changes:unknown[];next:string}>('GET',`/servers/${encodeURIComponent(id)}/inventory?after=${encodeURIComponent(after)}`),
  discover:(id:string)=>request<{status:string;warning:string}>('POST',`/servers/${encodeURIComponent(id)}/inventory/discover`,{}),
