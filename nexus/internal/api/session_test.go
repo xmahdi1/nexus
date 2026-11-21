@@ -2,6 +2,9 @@ package api
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/xmahdi1/nexus/internal/auth"
 	"github.com/xmahdi1/nexus/internal/config"
 	"github.com/xmahdi1/nexus/internal/db"
@@ -81,10 +83,10 @@ func TestHTTPSOriginSessionAndLogoutLifecycle(t *testing.T) {
 		t.Fatal("invalid upgrade reached remote handler")
 	}
 	// Old cookies and correctly signed obsolete JWTs never authenticate.
-	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{}).SignedString(cfg.EncryptionKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	unsigned := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`)) + "." + base64.RawURLEncoding.EncodeToString([]byte(`{}`))
+	signature := hmac.New(sha256.New, cfg.EncryptionKey)
+	signature.Write([]byte(unsigned))
+	token := unsigned + "." + base64.RawURLEncoding.EncodeToString(signature.Sum(nil))
 	for _, name := range []string{"nexus_token", auth.CookieName()} {
 		r := secureTestRequest("GET", "/api/servers", nil)
 		r.AddCookie(&http.Cookie{Name: name, Value: token})
