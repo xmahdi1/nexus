@@ -21,7 +21,6 @@ try{
   const response=await api(context,'/auth/mfa/enable',{setupToken:enrollment.setupToken,code:otp(enrollment.secret)});assert.equal(response.status(),200);const result=await response.json();assert.equal(result.recoveryCodes.length,10);return result.recoveryCodes
  }
  await login(ownerPage,'owner')
- const credentialBudgetStarted=Date.now()
  // Real inventory preview; explicit grants include dev but exclude prod in the
  // same automation group. Environment submission below is a UI-only fixture.
  await ownerPage.goto(url+'/automation')
@@ -54,6 +53,7 @@ try{
  await ownerPage.unroute('**/api/features')
  await ownerPage.unroute('**/api/servers/dev/operations/ansible/environment/install')
  await ownerPage.unroute('**/api/servers/dev/operations/runs/*/inspect')
+ const credentialBudgetStarted=Date.now()
  const invite=await api(owner,'/users/invitations',{username:'viewer',roleId:'viewer',scopeType:'server',scopeId:'dev',currentPassword:password});assert.equal(invite.status(),201);const invitation=await invite.json()
  await viewerPage.goto(url+'/join#invite='+invitation.token)
  await viewerPage.getByLabel('New password',{exact:true}).fill(password);await viewerPage.getByLabel('Confirm password',{exact:true}).fill(password);await viewerPage.getByRole('button',{name:'Accept invitation',exact:true}).click()
