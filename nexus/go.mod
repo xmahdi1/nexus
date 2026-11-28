@@ -11,8 +11,8 @@ require (
 	github.com/pquerna/otp v1.5.0
 	golang.org/x/crypto v0.59.0
 	golang.org/x/term v0.48.0
-	gorm.io/driver/sqlite v1.5.7
-	gorm.io/gorm v1.25.12
+	gorm.io/driver/sqlite v1.6.0
+	gorm.io/gorm v1.30.0
 )
 
 require (
