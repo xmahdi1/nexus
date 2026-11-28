@@ -104,7 +104,8 @@ with tempfile.TemporaryDirectory(prefix="nexus-ssh-lab-") as directory:
                     if connection.recv(128).startswith(b"SSH-"):
                         break
             except OSError:
-                time.sleep(0.1)
+                pass
+            time.sleep(0.1)
         else:
             subprocess.run(docker + ["logs", container], check=False)
             subprocess.run(
