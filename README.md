@@ -58,6 +58,7 @@ Keep the Nexus configuration, data key, and database together in recovery storag
 ## Project links
 
 - [Deploy, migrate, and recover](DEPLOYMENT.md)
+- [Release process and image verification](RELEASING.md)
 - [Contribute and run checks](CONTRIBUTING.md)
 - [Get help](SUPPORT.md)
 - [Report a security issue](SECURITY.md)

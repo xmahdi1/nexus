@@ -20,6 +20,7 @@ check: backend frontend docs scripts-check
 scripts-check: scripts-format
 	$(PYTHON) scripts/ci/check_scripts.py
 	$(PYTHON) scripts/ci/test_export_source.py
+	$(PYTHON) scripts/ci/test_release.py
 	$(PYTHON) scripts/deploy_test.py
 	$(PYTHON) scripts/ansible_collections_test.py
 	$(PYTHON) scripts/ansible_callback_test.py
