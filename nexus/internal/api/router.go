@@ -14,6 +14,7 @@ import (
 	"github.com/xmahdi1/nexus/internal/authorization"
 	"github.com/xmahdi1/nexus/internal/automation"
 	"github.com/xmahdi1/nexus/internal/backups"
+	"github.com/xmahdi1/nexus/internal/buildinfo"
 	"github.com/xmahdi1/nexus/internal/config"
 	"github.com/xmahdi1/nexus/internal/docker"
 	"github.com/xmahdi1/nexus/internal/filemanager"
@@ -190,6 +191,10 @@ func NewRouter(db *gorm.DB, cfg *config.Config, pool *nexusssh.Pool, mon *monito
 		r.With(nexusMW.CredentialRateLimit).Post("/api/users/{uid}/unlock", accountsH.Unlock)
 		r.With(nexusMW.CredentialRateLimit).Post("/api/auth/mfa/recovery-codes", accountsH.Regenerate)
 		r.Get("/api/auth/me", authH.Me)
+		r.Get("/api/version", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(buildinfo.Current())
+		})
 		r.Get("/api/features", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]bool{"backups": cfg.BackupsEnabled, "automation": cfg.AutomationEnabled, "inventory": cfg.InventoryEnabled, "jobSupervision": cfg.JobSupervisionEnabled, "operationSupervision": cfg.OperationSupervisionEnabled, "vault": cfg.VaultEnabled})

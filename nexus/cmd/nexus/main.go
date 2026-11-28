@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"github.com/xmahdi1/nexus/internal/api"
 	"github.com/xmahdi1/nexus/internal/auth"
 	"github.com/xmahdi1/nexus/internal/backups"
+	"github.com/xmahdi1/nexus/internal/buildinfo"
 	"github.com/xmahdi1/nexus/internal/config"
 	"github.com/xmahdi1/nexus/internal/db"
 	"github.com/xmahdi1/nexus/internal/inventory"
@@ -29,6 +31,13 @@ import (
 var mountFrontend = func(r http.Handler, cfg *config.Config) http.Handler { return r }
 
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "version" || os.Args[1] == "--version") {
+		if err := json.NewEncoder(os.Stdout).Encode(buildinfo.Current()); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "key-rotate" {
 		if err := runKeyRotate(os.Args[2:], os.Stdout); err != nil {
 			log.Fatalf("key rotation failed: %v", err)

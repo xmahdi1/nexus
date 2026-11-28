@@ -11,7 +11,13 @@ WORKDIR /build
 COPY nexus/ .
 COPY integrations/ansible/environment.py integrations/ansible/requirements.lock /integrations/ansible/
 COPY --from=frontend /app/dist ./internal/static/dist
-RUN CGO_ENABLED=1 go test ./... && CGO_ENABLED=1 go build -tags production -o nexus ./cmd/nexus
+RUN CGO_ENABLED=1 go test ./...
+ARG VERSION=dev
+ARG REVISION=""
+ARG BUILD_DATE=""
+RUN CGO_ENABLED=1 go build -trimpath -tags production \
+    -ldflags="-X github.com/xmahdi1/nexus/internal/buildinfo.version=${VERSION} -X github.com/xmahdi1/nexus/internal/buildinfo.commit=${REVISION} -X github.com/xmahdi1/nexus/internal/buildinfo.built=${BUILD_DATE}" \
+    -o nexus ./cmd/nexus
 
 FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 RUN apk upgrade --no-cache && apk add --no-cache ca-certificates tzdata python3
@@ -22,7 +28,14 @@ RUN mkdir -p /data && chown nexus:nexus /app /app/nexus /data && chmod 700 /data
 ENV NEXUS_DB_PATH=/data/nexus.db
 VOLUME ["/data"]
 EXPOSE 8080
-LABEL org.opencontainers.image.source="https://github.com/xmahdi1/nexus" \
+ARG VERSION=dev
+ARG REVISION=""
+ARG BUILD_DATE=""
+LABEL org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.description="Self-hosted Linux infrastructure dashboard" \
+      org.opencontainers.image.source="https://github.com/xmahdi1/nexus" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.title="Nexus"
 USER nexus

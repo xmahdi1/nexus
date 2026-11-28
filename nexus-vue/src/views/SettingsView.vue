@@ -42,6 +42,11 @@ const sections = [
 ];
 
 const activeSection = ref('appearance');
+const build = ref<Awaited<ReturnType<typeof api.version>>>();
+
+onMounted(async () => {
+  build.value = await api.version().catch(() => undefined);
+});
 const theme = ref<Theme>(getTheme());
 const langLabels: Record<string, string> = { en: 'English', de: 'Deutsch', fr: 'Français' };
 
@@ -367,6 +372,13 @@ onUnmounted(() => observer?.disconnect());
 
         <div class="flex-1 space-y-8 min-w-0">
           <section id="appearance" class="bg-card border rounded-xl p-5 sm:p-6 space-y-4 scroll-mt-4">
+            <div v-if="build" class="text-xs text-muted-foreground sm:text-right">
+              Nexus {{ build.version }} · {{ build.os }}/{{ build.arch }}
+              <span v-if="build.commit" class="font-mono" :title="build.commit">
+                · {{ build.commit.slice(0, 12) }}
+              </span>
+              <span v-if="build.built"> · {{ build.built }}</span>
+            </div>
             <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Appearance</h2>
             <div class="flex flex-wrap items-center justify-between gap-3">
               <div>
