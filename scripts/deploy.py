@@ -157,7 +157,10 @@ def main():
         ).stdout.strip()
     else:
         tag = "nexus:setup-" + str(time.time_ns())
-        command(["docker", "build", "-t", tag, str(ROOT)])
+        with tempfile.TemporaryDirectory(prefix="nexus-build-") as workspace:
+            source = Path(workspace) / "source"
+            command([sys.executable, str(ROOT / "scripts/ci/export_source.py"), str(source)])
+            command(["docker", "build", "-t", tag, str(source)])
         image = command(
             ["docker", "image", "inspect", "--format", "{{.Id}}", tag], capture=True
         ).stdout.strip()

@@ -30,7 +30,7 @@ copy. Keep the source installation stopped during and after cutover.
 
 ## Manual Compose install
 
-You can run the repository Compose file directly. The setup command below
+You can run the repository Compose file from a clean checkout. The setup command below
 requires the Go version in [go.mod](nexus/go.mod) and a C compiler for SQLite.
 
 ```sh
@@ -54,7 +54,8 @@ The Compose service exposes `127.0.0.1:8090`. The named volume holds
 `/data/nexus.db` by default. Preserve the volume and `.env` for upgrades.
 On a private TLS reverse proxy, set `NEXUS_TRUST_PROXY=true` only when the proxy
 overwrites forwarded scheme and client IP headers. Preserve the incoming Host
-and allow WebSocket upgrades. Keep the backend off untrusted networks.
+and allow WebSocket upgrades. Keep the backend off untrusted networks. Use the guided installer to build from
+tracked source when your working checkout contains private local files.
 
 ## First owner and additional accounts
 
