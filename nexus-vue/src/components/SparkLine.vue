@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, useId } from 'vue';
 
 const props = defineProps<{
   data: number[];
@@ -13,7 +13,7 @@ const W = 400;
 const FIXED = 60;
 const H = computed(() => props.height ?? 56);
 const clr = computed(() => props.color ?? '#3b82f6');
-const uid = Math.random().toString(36).slice(2);
+const uid = useId();
 
 const padded = computed<number[]>(() => {
   const d = props.data;

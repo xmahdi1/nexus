@@ -50,21 +50,24 @@ func parseArgon(encoded string) (argonHash, error) {
 	if len(params) != 3 {
 		return parsed, invalid
 	}
-	values := make([]uint64, 3)
-	for i, prefix := range []string{"m=", "t=", "p="} {
-		if !strings.HasPrefix(params[i], prefix) {
-			return parsed, invalid
-		}
-		value, err := strconv.ParseUint(strings.TrimPrefix(params[i], prefix), 10, 32)
-		if err != nil {
-			return parsed, invalid
-		}
-		values[i] = value
-	}
-	if values[0] < 8192 || values[0] > 128*1024 || values[1] < 1 || values[1] > 5 || values[2] < 1 || values[2] > 4 {
+	memoryText, memoryOK := strings.CutPrefix(params[0], "m=")
+	iterationsText, iterationsOK := strings.CutPrefix(params[1], "t=")
+	parallelismText, parallelismOK := strings.CutPrefix(params[2], "p=")
+	if !memoryOK || !iterationsOK || !parallelismOK {
 		return parsed, invalid
 	}
-	var err error
+	memory, err := strconv.ParseUint(memoryText, 10, 32)
+	if err != nil || memory < 8192 || memory > 128*1024 {
+		return parsed, invalid
+	}
+	iterations, err := strconv.ParseUint(iterationsText, 10, 32)
+	if err != nil || iterations < 1 || iterations > 5 {
+		return parsed, invalid
+	}
+	parallelism, err := strconv.ParseUint(parallelismText, 10, 8)
+	if err != nil || parallelism < 1 || parallelism > 4 {
+		return parsed, invalid
+	}
 	parsed.salt, err = base64.RawStdEncoding.Strict().DecodeString(parts[4])
 	if err != nil || len(parsed.salt) != 16 {
 		return parsed, invalid
@@ -73,9 +76,9 @@ func parseArgon(encoded string) (argonHash, error) {
 	if err != nil || len(parsed.digest) != 32 {
 		return parsed, invalid
 	}
-	parsed.memory = uint32(values[0])
-	parsed.iterations = uint32(values[1])
-	parsed.parallelism = uint8(values[2])
+	parsed.memory = uint32(memory)
+	parsed.iterations = uint32(iterations)
+	parsed.parallelism = uint8(parallelism)
 	return parsed, nil
 }
 
@@ -111,7 +114,7 @@ func VerifyPassword(encoded string, password []byte) bool {
 		if err != nil {
 			return false
 		}
-		candidate := argon2.IDKey(password, parsed.salt, parsed.iterations, parsed.memory, parsed.parallelism, uint32(len(parsed.digest)))
+		candidate := argon2.IDKey(password, parsed.salt, parsed.iterations, parsed.memory, parsed.parallelism, 32)
 		return subtle.ConstantTimeCompare(candidate, parsed.digest) == 1
 	}
 	return bcrypt.CompareHashAndPassword([]byte(encoded), password) == nil
