@@ -23,7 +23,7 @@
     "@codemirror/state": "^6.7.6",
     "@codemirror/view": "^6.43.15",
     "@lezer/highlight": "^1.2.5",
-    "@lucide/vue": "^1.16.0",
+    "@lucide/vue": "^1.80.0",
     "@vueuse/core": "^11.3.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
