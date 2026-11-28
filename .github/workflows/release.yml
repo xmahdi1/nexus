@@ -210,7 +210,8 @@ jobs:
           set -euo pipefail
           digest=$(python3 scripts/ci/release.py assemble             "$RUNNER_TEMP/evidence" "$VERSION" "$GITHUB_SHA" "$RUNNER_TEMP/image-index.json")
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          printf 'Version %s\n\nSource `%s`\n\nTested OCI index `%s`\n'             "$VERSION" "$GITHUB_SHA" "$digest" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Version %s\n\nSource commit: %s\n\nTested OCI index: %s\n' \
+            "$VERSION" "$GITHUB_SHA" "$digest" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-index
@@ -340,7 +341,8 @@ jobs:
             cp "$RUNNER_TEMP/evidence/evidence-$arch/nexus-$arch.spdx.json" "$files/"
           done
           (cd "$files" && sha256sum ./* > SHA256SUMS)
-          printf 'Image: `%s@%s`\n\nNative Linux AMD64 and ARM64.\n\n' "$IMAGE" "$DIGEST" > "$RUNNER_TEMP/notes.md"
+          printf 'Image: %s@%s\n\nNative Linux AMD64 and ARM64.\n\n' \
+            "$IMAGE" "$DIGEST" > "$RUNNER_TEMP/notes.md"
           flags=()
           if [[ "$KIND" == rc ]]; then flags=(--prerelease --latest=false); fi
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$RUNNER_TEMP/current-notes"; then
