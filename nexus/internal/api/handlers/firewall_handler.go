@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"regexp"
@@ -79,10 +80,6 @@ func validFrom(f string) bool {
 		return err == nil
 	}
 	return net.ParseIP(f) != nil
-}
-
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func parseUFWOutput(output string) (string, []FirewallRule) {
@@ -174,8 +171,8 @@ func (h *FirewallHandler) connect(ctx context.Context, serverID string) (*gossh.
 	})
 }
 
-func fwRun(ctx context.Context, client *gossh.Client, cmd string) (string, error) {
-	out, err := nexusssh.Run(ctx, client, cmd, nil, nexusssh.CommandTimeout)
+func fwRun(ctx context.Context, client *gossh.Client, cmd string, input io.Reader) (string, error) {
+	out, err := nexusssh.Run(ctx, client, cmd, input, nexusssh.CommandTimeout)
 	return strings.TrimSpace(out), err
 }
 
@@ -186,7 +183,7 @@ func (h *FirewallHandler) Status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ufwOut, err := fwRun(r.Context(), client, `if command -v ufw >/dev/null 2>&1; then ufw status numbered 2>&1; else echo '__UFW_MISSING__'; fi`)
+	ufwOut, err := fwRun(r.Context(), client, `if command -v ufw >/dev/null 2>&1; then ufw status numbered 2>&1; else echo '__UFW_MISSING__'; fi`, nil)
 	if err != nil {
 		writeErr(w, "Firewall status unavailable.", "remote_error", 502)
 		return
@@ -205,7 +202,7 @@ func (h *FirewallHandler) Status(w http.ResponseWriter, r *http.Request) {
 
 	portScript := `ss -tlnp 2>/dev/null | grep 'LISTEN' | while IFS= read -r line; do port=$(printf '%s' "$line" | grep -oP ':\K\d+(?=\s)' | head -1); [ -z "$port" ] && continue; addr=$(printf '%s' "$line" | grep -oP '\S*:\d+(?=\s)' | head -1); proc=$(printf '%s' "$line" | grep -oP '"\K[^"]+(?=")' | head -1); pid=$(printf '%s' "$line" | grep -oP 'pid=\K\d+' | head -1); cmd=""; [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] && cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | head -c 80 | tr -d '\n'); printf 'tcp|%s|%s|%s|%s\n' "$port" "$addr" "$proc" "$cmd"; done`
 
-	portData, portErr := fwRun(r.Context(), client, portScript)
+	portData, portErr := fwRun(r.Context(), client, portScript, nil)
 	if portErr != nil {
 		writeErr(w, "Listener status unavailable.", "remote_error", 502)
 		return
@@ -223,7 +220,7 @@ func (h *FirewallHandler) Enable(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
 		return
 	}
-	if _, err = fwRun(r.Context(), client, `ufw --force enable 2>&1`); err != nil {
+	if _, err = fwRun(r.Context(), client, `ufw --force enable 2>&1`, nil); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
@@ -237,7 +234,7 @@ func (h *FirewallHandler) Disable(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
 		return
 	}
-	if _, err = fwRun(r.Context(), client, `ufw --force disable 2>&1`); err != nil {
+	if _, err = fwRun(r.Context(), client, `ufw --force disable 2>&1`, nil); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
@@ -250,6 +247,16 @@ type addRuleInput struct {
 	Action string `json:"action"`
 	From   string `json:"from"`
 }
+
+const addFirewallRule = `IFS= read -r action && IFS= read -r port && IFS= read -r source || exit 1
+if [ -z "$source" ]; then
+  exec ufw "$action" "$port"
+fi
+case "$port" in
+  */*) set -- proto "${port#*/}"; port=${port%/*} ;;
+  *) set -- ;;
+esac
+exec ufw "$action" from "$source" to any port "$port" "$@"`
 
 func (h *FirewallHandler) AddRule(w http.ResponseWriter, r *http.Request) {
 	var input addRuleInput
@@ -274,18 +281,12 @@ func (h *FirewallHandler) AddRule(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
 		return
 	}
-	var cmd string
-	if input.From != "" && input.From != "Anywhere" {
-		port, protocol, _ := strings.Cut(input.Port, "/")
-		cmd = fmt.Sprintf("ufw %s from %s to any port %s", input.Action, shellQuote(input.From), shellQuote(port))
-		if protocol != "" {
-			cmd += " proto " + protocol
-		}
-		cmd += " 2>&1"
-	} else {
-		cmd = fmt.Sprintf("ufw %s %s 2>&1", input.Action, shellQuote(input.Port))
+	source := input.From
+	if source == "Anywhere" {
+		source = ""
 	}
-	if _, err = fwRun(r.Context(), client, cmd); err != nil {
+	arguments := strings.NewReader(input.Action + "\n" + input.Port + "\n" + source + "\n")
+	if _, err = fwRun(r.Context(), client, addFirewallRule, arguments); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
@@ -300,11 +301,13 @@ func (h *FirewallHandler) DeleteRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n := chi.URLParam(r, "n")
-	if number, err := strconv.Atoi(n); err != nil || number < 1 {
+	number, err := strconv.Atoi(n)
+	if err != nil || number < 1 {
 		http.Error(w, `{"error":"rule number must be numeric"}`, http.StatusBadRequest)
 		return
 	}
-	if _, err = fwRun(r.Context(), client, fmt.Sprintf("ufw --force delete %s 2>&1", n)); err != nil {
+	arguments := strings.NewReader(strconv.Itoa(number) + "\n")
+	if _, err = fwRun(r.Context(), client, `IFS= read -r number && exec ufw --force delete "$number"`, arguments); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}

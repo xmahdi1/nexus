@@ -6,6 +6,7 @@ import (
 	"fmt"
 	nexusssh "github.com/xmahdi1/nexus/internal/ssh"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 
@@ -98,7 +99,12 @@ func (c *Client) Remove(id string) error {
 	return err
 }
 
+var containerLogTarget = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$`)
+
 func (c *Client) LogsStream(id string, tail int) (io.ReadCloser, error) {
+	if !containerLogTarget.MatchString(id) {
+		return nil, fmt.Errorf("invalid container name or ID")
+	}
 	setup, cancel := context.WithTimeout(c.ctx, 10*time.Second)
 	defer cancel()
 	sess, err := nexusssh.OpenSession(setup, c.ssh)
@@ -110,7 +116,8 @@ func (c *Client) LogsStream(id string, tail int) (io.ReadCloser, error) {
 		sess.Close()
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
-	cmd := fmt.Sprintf(`%s logs --tail %d --timestamps --follow %s 2>&1`, dockerPath, tail, shellescape(id))
+	sess.Stdin = strings.NewReader(id + "\n")
+	cmd := fmt.Sprintf(`IFS= read -r target && %s logs --tail %d --timestamps --follow -- "$target" 2>&1`, dockerPath, tail)
 	if err := nexusssh.SessionRequest(setup, sess, func() error { return sess.Start(cmd) }); err != nil {
 		sess.Close()
 		return nil, fmt.Errorf("docker logs: %w", err)

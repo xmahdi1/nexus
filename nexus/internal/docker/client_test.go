@@ -4,10 +4,12 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
 
+	"github.com/xmahdi1/nexus/internal/testssh"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -77,5 +79,32 @@ func TestListWithFakeSSH(t *testing.T) {
 	}
 	if command := <-commands; !strings.Contains(command, "ps -a --format") {
 		t.Fatalf("unexpected command %s", command)
+	}
+}
+
+func TestLogsStreamPassesContainerThroughStdin(t *testing.T) {
+	const target = "fixture-db"
+	client := testssh.Client(t, func(channel ssh.Channel, command string) uint32 {
+		if strings.Contains(command, target) || !strings.Contains(command, `-- "$target"`) {
+			return 126
+		}
+		input, err := io.ReadAll(channel)
+		if err != nil || string(input) != target+"\n" {
+			return 1
+		}
+		fmt.Fprintln(channel, "fixture log")
+		return 0
+	})
+	stream, err := NewClient(client).LogsStream(target, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	output, err := io.ReadAll(stream)
+	if err != nil || string(output) != "fixture log\n" {
+		t.Fatalf("unexpected stream %q: %v", output, err)
+	}
+	if _, err := NewClient(client).LogsStream("-flag", 200); err == nil {
+		t.Fatal("accepted invalid container name")
 	}
 }

@@ -103,12 +103,11 @@ func TestDisposableComposeStatefulUpgradeRollback(t *testing.T) {
 
 func TestComposeRecipeUsesStdinAndPrivatePermissions(t *testing.T) {
 	directory := t.TempDir()
-	recipe := filepath.Join(directory, "quoted ' recipe.yml")
+	recipe := filepath.Join(directory, "quoted ' recipe\n.yml")
 	secret := "fixture-value-from-stdin"
 	client := testssh.Client(t, func(channel ssh.Channel, command string) uint32 {
-		allowedWrite := writeCommand(recipe, secret)
-		allowedRead := "cat -- " + shellescape(recipe)
-		if command != allowedWrite && command != allowedRead || strings.Contains(command, secret) {
+		if (command != writeCommand && command != readCommand) ||
+			strings.Contains(command, recipe) || strings.Contains(command, secret) {
 			return 126
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -143,14 +142,14 @@ func TestComposeInterruptedWritePreservesPreviousRecipe(t *testing.T) {
 	}
 	content := "new complete recipe"
 	client := testssh.Client(t, func(channel ssh.Channel, command string) uint32 {
-		if command != writeCommand(recipe, content) {
+		if command != writeCommand {
 			return 126
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "sh", "-c", command)
 		// Simulate an interrupted SSH upload: the remote process sees only a prefix.
-		cmd.Stdin = io.LimitReader(channel, 5)
+		cmd.Stdin = io.LimitReader(channel, int64(len(pathInput(recipe))+65+5))
 		cmd.Stdout = channel
 		cmd.Stderr = channel.Stderr()
 		if err := cmd.Run(); err != nil {
