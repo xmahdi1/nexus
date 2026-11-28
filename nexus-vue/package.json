@@ -21,7 +21,7 @@
     "@codemirror/language": "^6.13.1",
     "@codemirror/lint": "^6.9.8",
     "@codemirror/state": "^6.7.6",
-    "@codemirror/view": "^6.43.15",
+    "@codemirror/view": "^6.44.0",
     "@lezer/highlight": "^1.2.5",
     "@lucide/vue": "^1.16.0",
     "@vueuse/core": "^11.3.0",
