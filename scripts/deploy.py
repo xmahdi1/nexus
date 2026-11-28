@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive local Docker setup. Run from a source checkout; no extra Python packages."""
+"""Interactive Nexus setup from a released image or a source checkout."""
 
 import argparse
 import json
@@ -15,6 +15,48 @@ import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
+RELEASE_IMAGE = "ghcr.io/xmahdi1/nexus"
+RELEASE_IDENTITY = "https://github.com/xmahdi1/nexus/.github/workflows/release.yml@refs/heads/main"
+RELEASE_ISSUER = "https://token.actions.githubusercontent.com"
+DIGEST = r"sha256:[a-f0-9]{64}"
+RELEASE_TAG = (
+    r"(?:latest|edge|sha-[a-f0-9]{40}|"
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-(?:rc|edge)\.(?:0|[1-9][0-9]*))?)"
+)
+
+
+def release_reference(value):
+    if re.fullmatch(DIGEST, value):
+        return f"{RELEASE_IMAGE}@{value}"
+    if len(value) <= 100 and re.fullmatch(RELEASE_TAG, value):
+        return f"{RELEASE_IMAGE}:{value}"
+    raise argparse.ArgumentTypeError("choose a Nexus version, latest, edge, or sha256 digest")
+
+
+def pull_release(command, reference):
+    if "@" in reference:
+        pinned = reference
+    else:
+        output = command(["docker", "pull", reference], capture=True).stdout
+        matches = re.findall(rf"^Digest: ({DIGEST})$", output, re.M)
+        if len(matches) != 1:
+            raise RuntimeError("Unable to resolve the tag. Retry with the published image digest.")
+        pinned = f"{RELEASE_IMAGE}@{matches[0]}"
+    command(
+        [
+            "cosign",
+            "verify",
+            "--certificate-identity",
+            RELEASE_IDENTITY,
+            "--certificate-oidc-issuer",
+            RELEASE_ISSUER,
+            pinned,
+        ],
+        capture=True,
+    )
+    command(["docker", "pull", pinned], capture=True)
+    return pinned
 
 
 def private_write(path, data, mode=0o600):
@@ -60,7 +102,16 @@ def yes(label, default=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", type=Path, help="new installation directory (must be empty)")
-    parser.add_argument("--image", help="use an already-local Nexus image instead of building")
+    image_source = parser.add_mutually_exclusive_group()
+    image_source.add_argument(
+        "--image", help="use an already-local Nexus image instead of building"
+    )
+    image_source.add_argument(
+        "--release",
+        type=release_reference,
+        metavar="VERSION_OR_DIGEST",
+        help="install a signed release from GHCR. Requires cosign.",
+    )
     options = parser.parse_args()
     if os.name != "posix" or not sys.stdin.isatty():
         raise RuntimeError("Run in an interactive Linux/macOS terminal with local Docker.")
@@ -69,6 +120,8 @@ def main():
     def command(args, capture=False, check=True):
         return subprocess.run(args, env=env, check=check, capture_output=capture, text=True)
 
+    if options.release and shutil.which("cosign") is None:
+        raise RuntimeError("Install cosign to verify Nexus releases.")
     command(["docker", "compose", "version"], capture=True)
     context = command(["docker", "context", "show"], capture=True).stdout.strip()
     endpoint = (
@@ -148,10 +201,9 @@ def main():
     ):
         raise RuntimeError("The old process must remain stopped during migration and cutover.")
     os.umask(0o077)
-    destination.mkdir(parents=True, exist_ok=True, mode=0o700)
-    destination.chmod(0o700)
-    (destination / "data").mkdir(mode=0o700)
-    if options.image:
+    if options.release:
+        image = pull_release(command, options.release)
+    elif options.image:
         image = command(
             ["docker", "image", "inspect", "--format", "{{.Id}}", options.image], capture=True
         ).stdout.strip()
@@ -164,8 +216,13 @@ def main():
         image = command(
             ["docker", "image", "inspect", "--format", "{{.Id}}", tag], capture=True
         ).stdout.strip()
-    if not re.fullmatch(r"sha256:[a-f0-9]{64}", image):
-        raise RuntimeError("Could not identify the built image.")
+    if not re.fullmatch(DIGEST, image) and not (
+        options.release and re.fullmatch(rf"{re.escape(RELEASE_IMAGE)}@{DIGEST}", image)
+    ):
+        raise RuntimeError("Could not identify the Nexus image.")
+    destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+    destination.chmod(0o700)
+    (destination / "data").mkdir(mode=0o700)
     if mode == "new":
         command(
             [

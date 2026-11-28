@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Deployment preparation tests. Docker and service starts are replaced by fixtures."""
 
+import argparse
 import importlib.util
 import os
 from pathlib import Path
@@ -33,6 +34,30 @@ class DeploymentTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 deploy.snapshot(root / "source.db", root / "copy.db")
             original.close()
+
+    def test_release_tag_is_verified_and_pinned_before_use(self):
+        key = "sha256:" + "a" * 64
+        pinned = deploy.RELEASE_IMAGE + "@" + key
+        reference = deploy.release_reference("1.2.3-rc.4")
+        execute = MagicMock(
+            side_effect=[MagicMock(stdout=f"Digest: {key}\n"), MagicMock(), MagicMock()]
+        )
+        self.assertEqual(deploy.pull_release(execute, reference), pinned)
+        commands = [call.args[0] for call in execute.call_args_list]
+        self.assertEqual(commands[0], ["docker", "pull", reference])
+        self.assertEqual(commands[1][:2], ["cosign", "verify"])
+        self.assertIn(deploy.RELEASE_IDENTITY, commands[1])
+        self.assertEqual(commands[1][-1], pinned)
+        self.assertEqual(commands[2], ["docker", "pull", pinned])
+
+    def test_release_digest_failure_stops_before_pull(self):
+        key = "sha256:" + "f" * 64
+        execute = MagicMock(side_effect=subprocess.CalledProcessError(1, ["cosign", "verify"]))
+        with self.assertRaises(subprocess.CalledProcessError):
+            deploy.pull_release(execute, deploy.release_reference(key))
+        execute.assert_called_once()
+        with self.assertRaises(argparse.ArgumentTypeError):
+            deploy.release_reference("other.example/nexus:latest")
 
     def migration(self, fails=False):
         with tempfile.TemporaryDirectory() as directory:
