@@ -1,0 +1,122 @@
+name: Integration
+on:
+  push:
+    branches: [main, nexusv2, chore/nexus-2-public-baseline]
+    paths:
+      - 'nexus/**'
+      - 'nexus-vue/**'
+      - 'scripts/**'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - '.github/workflows/integration.yml'
+  workflow_dispatch:
+  schedule:
+    - cron: '19 5 * * 1'
+permissions:
+  contents: read
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  package-browser:
+    name: Package and browser (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: nexus/go.sum
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.20.0'
+          cache: npm
+          cache-dependency-path: nexus-vue/package-lock.json
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14.4'
+      - name: Install fixture tools
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r scripts/requirements-ci.txt
+          npm --prefix nexus-vue ci
+          npm --prefix nexus-vue exec -- playwright install --with-deps chromium
+      - name: Native build, browser and recovery
+        env:
+          NEXUS_BROWSER_SANDBOX: 'false'
+        run: |
+          make build
+          make browser
+          make recovery
+      - name: Tracked-source container, cold schema8 fixture and image recovery
+        run: |
+          python scripts/ci/export_source.py "$RUNNER_TEMP/nexus-source"
+          docker build -t nexus:ci-current "$RUNNER_TEMP/nexus-source"
+          python scripts/ci/health_image.py --image nexus:ci-current
+          python scripts/deploy_lab.py --image nexus:ci-current
+          python scripts/ci/schema8_fixture.py
+          legacy_id=$(docker image inspect nexus:ci-schema8 --format '{{.Id}}')
+          python scripts/secrets_image_lab.py --old-image "$legacy_id" --new-image nexus:ci-current
+  ssh:
+    name: Disposable SSH and proxy engines
+    if: ${{ github.event_name != 'push' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: nexus/go.sum
+      - run: python3 scripts/ssh_lab.py
+  supervision:
+    name: Disposable systemd supervision
+    if: ${{ github.event_name != 'push' }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        guest: [debian12, ubuntu24]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: nexus/go.sum
+      - run: python3 scripts/supervision_lab.py --guest ${{ matrix.guest }}
+  adapters:
+    name: Adapter fixtures (${{ matrix.profile }})
+    if: ${{ github.event_name != 'push' }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [vault, certificates, ansible, backups, runner]
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: nexus/go.sum
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14.4'
+      - name: Install fixture dependencies
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r scripts/requirements-ci.txt
+      - name: Run existing disposable adapter fixtures
+        run: python scripts/ci/integration_profile.py ${{ matrix.profile }}

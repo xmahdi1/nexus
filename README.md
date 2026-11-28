@@ -1,195 +1,65 @@
 # Nexus
 
-A self-hosted server management dashboard. Manage SSH terminals, Docker containers, files, metrics, reverse proxies, and more.
+<img src="nexus-vue/public/logo.svg" width="72" height="72" alt="Nexus logo">
 
----
+Nexus is a self-hosted dashboard for Linux infrastructure. Connect your servers over SSH to inspect what runs on them, manage containers, run approved automation, and back up selected data. Nexus runs on infrastructure you control and works without a Nexus cloud account.
 
-## Features
+[![CI](https://github.com/xmahdi1/nexus/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/xmahdi1/nexus/actions/workflows/ci.yml)
+[![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-- **SSH Terminal** — browser-based terminal
-- **Docker** — list, start, stop, restart, remove containers, view logs
-- **Docker Compose** — read, edit, and run `up`/`down`
-- **App Marketplace** — one-click deploy for 16 built-in apps (Vaultwarden, Nextcloud, Gitea, PostgreSQL, Redis, and more) + create custom templates
-- **File Manager** — SFTP-based file browser with upload, download, preview, and mkdir
-- **Live Metrics** — real-time CPU, RAM, disk, network, and process monitoring
-- **Reverse Proxy** — manage nginx and Caddy rules with SSL
-- **Firewall** — UFW rule management and full listening port inventory
-- **Cron Jobs** — view and edit server crontab entries
-- **Scheduled Tasks** — Nexus-managed interval tasks with run history
-- **Monitoring & Alerts** — server uptime monitoring with Telegram notifications
-- **Services** — bookmark dashboard for your self-hosted services
+![Nexus dashboard showing three fictional servers](.github/media/dashboard.png)
 
----
+<details>
+<summary>Watch a short tour of the dashboard, servers, and services</summary>
 
-## Stack
+![Nexus demo navigating between the dashboard, server list, and service bookmarks](.github/media/navigation.gif)
 
-| Layer    | Tech |
-|----------|------|
-| Backend  | Go 1.23, Chi, GORM, SQLite |
-| Frontend | Vue 3, TypeScript, Vite, Tailwind CSS v4 |
+</details>
 
----
+The screenshots and recording use fictional infrastructure in an isolated local fixture.
 
-## Quick Start
+## Get started
 
-### 1. Clone the repo
+On a Linux host with Git, Python 3, Docker Engine, and Compose v2:
 
-```bash
+```sh
 git clone https://github.com/xmahdi1/nexus.git
 cd nexus
+python3 scripts/deploy.py
 ```
 
-### 2. Generate your credentials
+Choose **New** for a fresh installation or **Migrate** to copy an existing Nexus installation. The installer builds the image, prompts for setup choices, and starts Nexus on a loopback port. Connect through a private HTTPS proxy before signing in. At the first sign-in, leave **Username** empty and enter the administrator password you configured.
 
-```bash
-cd nexus
-go run ./cmd/nexus setup
-```
+For a manual Compose installation, native development, or migration and rollback instructions, see the [deployment guide](DEPLOYMENT.md). Source builds require network access to fetch dependencies and a local Docker engine. Managed servers need reachable SSH and an OS account with access to the tools you plan to use.
 
-You will be prompted for a password. It prints two lines — paste them into a `.env` file at the repo root:
+## What you can do
 
-```
-NEXUS_PASSWORD_HASH='<generated>'
-NEXUS_ENCRYPTION_KEY=<generated>
-```
+| Area | Available tools |
+| --- | --- |
+| Servers | SSH terminal, SFTP files, live metrics, scheduled tasks, cron, and service bookmarks |
+| Discovery | Host hardware and OS, disks and mounts, DNS resolver settings, listeners, loaded systemd services, Docker objects, and observed reverse-proxy routes |
+| Apps and Docker | Container logs and lifecycle, saved Compose deployments, Marketplace apps, and custom templates |
+| Networking | nginx and Caddy configuration, certificates, port inspection, and UFW rules |
+| YAML Editor | Edit server YAML with syntax highlighting and suggestions for Compose, GitHub Actions, and Kubernetes manifests |
+| Automation | Ansible inventory and controller projects, review and approval, scheduled runs, and optional Vault secret references |
+| GitHub | GitHub App connections, workflow dispatch and run views, workflow edits via draft PRs, and self-hosted runner setup |
+| Vault | Deploy HashiCorp Vault and manage supported operations such as KV v2, policies, auth, leases, PKI, audit, and transit |
+| Backup and recovery | Discover and select supported files, volumes, databases, and Nexus recovery data. Run once or on a schedule. Use mounted storage or S3 and verify restore copies. |
+| Access | Invitation-only accounts, MFA and recovery codes, server and group grants, revocable sessions, and audit history |
 
-### 3. Run with Docker Compose
+Inventory, Vault, automation, and guided backups are opt-in. Nexus discovers hosts you have registered. YAML suggestions help edit Kubernetes manifests. See the [roadmap](ROADMAP.md) for planned runtime management and the [security policy](SECURITY.md) for deployment boundaries.
 
-```bash
-docker compose up -d
-```
+## How Nexus runs
 
-Open `http://localhost:8080` and log in with the password you set in step 2.
+A single Go service serves the Vue dashboard and API and keeps local state in SQLite. The controller uses the SSH credentials you configure to connect to registered hosts. Most host operations run on those hosts. Ansible runs on the selected controller, and GitHub workflows run on GitHub-hosted or registered self-hosted runners.
 
----
+Keep the Nexus configuration, data key, and database together in recovery storage. Back up remote application data separately. Review the [security architecture](ARCHITECTURE.md) and [recovery instructions](DEPLOYMENT.md#recover-or-roll-back) before operating Nexus on shared infrastructure.
 
-## Configuration
+## Project links
 
-Copy `.env.example` to `.env` and fill in the values from `nexus setup`.
-
-| Variable | Description |
-|----------|-------------|
-| `NEXUS_PASSWORD_HASH` | **Required.** bcrypt hash of your admin password (generated by `nexus setup`) |
-| `NEXUS_ENCRYPTION_KEY` | **Required.** AES-256 key for encrypting SSH private keys at rest (generated by `nexus setup`) |
-| `NEXUS_PORT` | HTTP listen port (default: `8080`) |
-| `NEXUS_DB_PATH` | SQLite database path (default: `nexus.db`) |
-
----
-
-## Build from Source
-
-**Requirements:** Go 1.23+, Node.js 20+, GCC (for CGO/SQLite)
-
-```bash
-git clone https://github.com/xmahdi1/nexus.git
-cd nexus
-
-# 1. Generate credentials
-cd nexus && go run ./cmd/nexus setup
-# Paste the output into .env
-
-# 2. Build frontend
-cd ../nexus-vue
-npm install
-npm run build
-
-# 3. Build backend (embeds the frontend)
-cd ../nexus
-CGO_ENABLED=1 go build -tags production -o nexus ./cmd/nexus
-
-# 4. Run
-./nexus
-```
-
-### Development
-
-```bash
-# Terminal 1 — backend
-cd nexus && go run ./cmd/nexus
-
-# Terminal 2 — frontend dev server
-cd nexus-vue && npm run dev
-```
-
----
-
-## Security
-
-Nexus is a single-admin tool. There is no user database — your credentials live in `.env`.
-
-- Run `nexus setup` to set your password and generate your keys
-- To change your password, run `nexus setup` again and update `.env`
-- SSH private keys are encrypted at rest with AES-256-GCM using `NEXUS_ENCRYPTION_KEY` and decrypted in-memory only when an SSH connection is needed
-- JWTs expire after 24 hours
-- MFA (TOTP) is available and recommended for internet-facing deployments
-
----
-
-## Reverse Proxy Setup
-
-### nginx
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name nexus.yourdomain.com;
-
-    location / {
-        proxy_pass http://localhost:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_read_timeout 3600;
-    }
-}
-```
-
-The `Upgrade` and `Connection` headers are required for WebSocket (terminal, metrics, logs).
-
-### Caddy
-
-```
-nexus.yourdomain.com {
-    reverse_proxy localhost:8080
-}
-```
-
----
-
-## App Marketplace Templates
-
-| App | Category |
-|-----|----------|
-| Vaultwarden | Security |
-| Nextcloud | Storage |
-| Gitea | Development |
-| PostgreSQL | Databases |
-| MariaDB | Databases |
-| MongoDB | Databases |
-| Redis | Databases |
-| Ollama | AI |
-| Grafana | Monitoring |
-| Uptime Kuma | Monitoring |
-| Plausible Analytics | Analytics |
-| Ghost | CMS |
-| Nginx Proxy Manager | Networking |
-| MinIO | Storage |
-
-Custom templates support variable substitution (`${VAR_NAME}`) and post-deploy messages.
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE)
-
----
-
-## Acknowledgements
-
-- [xterm.js](https://xtermjs.org/) — terminal emulator
-- [Lucide](https://lucide.dev/) — icons
-- [shadcn/ui](https://ui.shadcn.com/) — UI primitives
-- [Chi](https://github.com/go-chi/chi) — HTTP router
-- [GORM](https://gorm.io/) — ORM
+- [Deploy, migrate, and recover](DEPLOYMENT.md)
+- [Contribute and run checks](CONTRIBUTING.md)
+- [Get help](SUPPORT.md)
+- [Report a security issue](SECURITY.md)
+- [Roadmap](ROADMAP.md)
+- [MIT License](LICENSE)

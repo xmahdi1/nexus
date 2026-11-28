@@ -1,10 +1,14 @@
 package docker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	nexusssh "github.com/xmahdi1/nexus/internal/ssh"
 	"io"
+	"regexp"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -13,6 +17,7 @@ const dockerPath = `PATH="$PATH:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbi
 
 type Client struct {
 	ssh *ssh.Client
+	ctx context.Context
 }
 
 type Container struct {
@@ -36,10 +41,15 @@ type dockerPS struct {
 type logStream struct {
 	reader  io.Reader
 	session *ssh.Session
+	stop    func() bool
 }
 
 func NewClient(sshClient *ssh.Client) *Client {
-	return &Client{ssh: sshClient}
+	return NewClientContext(context.Background(), sshClient)
+}
+
+func NewClientContext(ctx context.Context, client *ssh.Client) *Client {
+	return &Client{ssh: client, ctx: ctx}
 }
 
 func (c *Client) List() ([]Container, error) {
@@ -89,8 +99,15 @@ func (c *Client) Remove(id string) error {
 	return err
 }
 
+var containerLogTarget = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$`)
+
 func (c *Client) LogsStream(id string, tail int) (io.ReadCloser, error) {
-	sess, err := c.ssh.NewSession()
+	if !containerLogTarget.MatchString(id) {
+		return nil, fmt.Errorf("invalid container name or ID")
+	}
+	setup, cancel := context.WithTimeout(c.ctx, 10*time.Second)
+	defer cancel()
+	sess, err := nexusssh.OpenSession(setup, c.ssh)
 	if err != nil {
 		return nil, fmt.Errorf("new session: %w", err)
 	}
@@ -99,31 +116,22 @@ func (c *Client) LogsStream(id string, tail int) (io.ReadCloser, error) {
 		sess.Close()
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
-	cmd := fmt.Sprintf(`%s logs --tail %d --timestamps --follow %s 2>&1`, dockerPath, tail, shellescape(id))
-	if err := sess.Start(cmd); err != nil {
+	sess.Stdin = strings.NewReader(id + "\n")
+	cmd := fmt.Sprintf(`IFS= read -r target && %s logs --tail %d --timestamps --follow -- "$target" 2>&1`, dockerPath, tail)
+	if err := nexusssh.SessionRequest(setup, sess, func() error { return sess.Start(cmd) }); err != nil {
 		sess.Close()
 		return nil, fmt.Errorf("docker logs: %w", err)
 	}
-	return &logStream{reader: pipe, session: sess}, nil
+	stop := context.AfterFunc(c.ctx, func() { sess.Close() })
+	return &logStream{reader: pipe, session: sess, stop: stop}, nil
 }
 
 func (s *logStream) Read(p []byte) (int, error) { return s.reader.Read(p) }
-func (s *logStream) Close() error               { return s.session.Close() }
+func (s *logStream) Close() error               { s.stop(); return s.session.Close() }
 
 func (c *Client) exec(cmd string) (string, error) {
-	sess, err := c.ssh.NewSession()
-	if err != nil {
-		return "", fmt.Errorf("new session: %w", err)
-	}
-	defer sess.Close()
-	out, err := sess.Output(cmd)
-	if err != nil {
-		if strings.Contains(err.Error(), "127") {
-			return "", fmt.Errorf("docker not found on this server")
-		}
-		return "", err
-	}
-	return string(out), nil
+	out, err := nexusssh.Run(c.ctx, c.ssh, cmd, nil, nexusssh.CommandTimeout)
+	return out, err
 }
 
 func shellescape(s string) string {

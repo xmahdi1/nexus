@@ -3,8 +3,12 @@ package monitor
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"html"
+	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -20,6 +24,7 @@ const (
 )
 
 type Alert struct {
+	ServerID   string
 	Type       AlertType
 	ServerName string
 	ServerHost string
@@ -38,7 +43,7 @@ func NewBot(token, chatID string) *Bot {
 	return &Bot{
 		token:  token,
 		chatID: chatID,
-		client: &http.Client{Timeout: 10 * time.Second},
+		client: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}
 }
 
@@ -52,23 +57,31 @@ func (b *Bot) Send(text string) error {
 		"parse_mode": "HTML",
 	})
 	resp, err := b.client.Post(
-		fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", b.token),
+		fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", url.PathEscape(b.token)),
 		"application/json",
 		bytes.NewReader(payload),
 	)
 	if err != nil {
-		return fmt.Errorf("telegram send: %w", err)
+		// net/http errors include the request URL, which contains the bot token.
+		return errors.New("Telegram transport failed")
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		var result map[string]any
-		json.NewDecoder(resp.Body).Decode(&result)
-		return fmt.Errorf("telegram API %d: %v", resp.StatusCode, result["description"])
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("Telegram API returned status %d", resp.StatusCode)
+	}
+	var result struct {
+		OK bool `json:"ok"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&result) != nil || !result.OK {
+		return errors.New("Telegram delivery was not confirmed")
 	}
 	return nil
 }
 
 func (b *Bot) Notify(a Alert) error {
+	a.ServerName = html.EscapeString(a.ServerName)
+	a.ServerHost = html.EscapeString(a.ServerHost)
+	a.Detail = html.EscapeString(a.Detail)
 	ts := a.OccurredAt.Format("15:04:05 MST")
 	switch a.Type {
 	case AlertServerDown:
@@ -118,17 +131,19 @@ func (b *Bot) Test() error {
 }
 
 func (b *Bot) GetMe() (map[string]any, error) {
-	resp, err := b.client.Get(fmt.Sprintf("https://api.telegram.org/bot%s/getMe", b.token))
+	resp, err := b.client.Get(fmt.Sprintf("https://api.telegram.org/bot%s/getMe", url.PathEscape(b.token)))
 	if err != nil {
-		return nil, err
+		return nil, errors.New("Telegram transport failed")
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, errors.New("Telegram identity request failed")
+	}
 	var result struct {
 		OK     bool           `json:"ok"`
 		Result map[string]any `json:"result"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
-	if !result.OK {
+	if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&result) != nil || !result.OK {
 		return nil, fmt.Errorf("invalid token")
 	}
 	return result.Result, nil

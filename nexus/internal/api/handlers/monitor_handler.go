@@ -4,10 +4,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/xmahdi1/nexus/internal/authorization"
+	nexuscrypto "github.com/xmahdi1/nexus/internal/crypto"
 	"github.com/xmahdi1/nexus/internal/models"
 	"github.com/xmahdi1/nexus/internal/monitor"
 	"gorm.io/gorm"
@@ -16,14 +20,31 @@ import (
 type MonitorHandler struct {
 	db  *gorm.DB
 	mon *monitor.Monitor
+	key []byte
 }
 
-func NewMonitorHandler(db *gorm.DB, mon *monitor.Monitor) *MonitorHandler {
-	return &MonitorHandler{db: db, mon: mon}
+func NewMonitorHandler(db *gorm.DB, mon *monitor.Monitor, key []byte) *MonitorHandler {
+	return &MonitorHandler{db: db, mon: mon, key: key}
 }
 
 func (h *MonitorHandler) Status(w http.ResponseWriter, r *http.Request) {
-	statuses := h.mon.GetStatuses()
+	var ids []string
+	if err := authorization.ScopedServers(r, h.db, "metrics.read").Pluck("servers.id", &ids).Error; err != nil {
+		writeErr(w, "Could not load scoped status.", "internal", 500)
+		return
+	}
+	visible := map[string]bool{}
+	for _, id := range ids {
+		visible[id] = true
+	}
+	statuses := []monitor.ServerStatus{}
+	if h.mon != nil {
+		for _, status := range h.mon.GetStatuses() {
+			if visible[status.ServerID] {
+				statuses = append(statuses, status)
+			}
+		}
+	}
 	if statuses == nil {
 		statuses = []monitor.ServerStatus{}
 	}
@@ -36,8 +57,8 @@ func (h *MonitorHandler) GetConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "config not found", "not_found", http.StatusNotFound)
 		return
 	}
-	if cfg.TelegramToken != "" {
-		cfg.TelegramToken = "••••" + cfg.TelegramToken[max(0, len(cfg.TelegramToken)-4):]
+	if cfg.TelegramTokenEnc != "" {
+		cfg.TelegramToken = "Configured"
 	}
 	writeJSON(w, cfg, http.StatusOK)
 }
@@ -51,20 +72,29 @@ func (h *MonitorHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 		NotifyServerUp   *bool  `json:"notifyServerUp"`
 		NotifyContainer  *bool  `json:"notifyContainer"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	if err := decoder.Decode(&body); err != nil || decoder.Decode(new(any)) != io.EOF || len(body.TelegramToken) > 1024 || strings.ContainsAny(body.TelegramToken, "\x00\r\n") || len(body.TelegramChatID) > 128 {
 		writeErr(w, "invalid body", "bad_request", http.StatusBadRequest)
 		return
 	}
 
 	var cfg models.AlertConfig
-	h.db.FirstOrCreate(&cfg, models.AlertConfig{ID: "default"})
+	if err := h.db.First(&cfg, "id=?", "default").Error; err != nil {
+		writeErr(w, "Notification settings unavailable.", "storage_unavailable", 503)
+		return
+	}
 
 	updates := map[string]any{}
 	if body.TelegramEnabled != nil {
 		updates["telegram_enabled"] = *body.TelegramEnabled
 	}
-	if body.TelegramToken != "" && body.TelegramToken != "••••"+body.TelegramToken[max(0, len(body.TelegramToken)-4):] {
-		updates["telegram_token"] = body.TelegramToken
+	if body.TelegramToken != "" && body.TelegramToken != "Configured" && !strings.HasPrefix(body.TelegramToken, "••••") {
+		sealed, err := nexuscrypto.EncryptNotificationToken(h.key, cfg.ID, []byte(body.TelegramToken))
+		if err != nil {
+			writeErr(w, "Could not protect notification credential.", "storage_unavailable", 503)
+			return
+		}
+		updates["telegram_token_enc"] = sealed
 	}
 	if body.TelegramChatID != "" {
 		updates["telegram_chat_id"] = body.TelegramChatID
@@ -79,12 +109,17 @@ func (h *MonitorHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 		updates["notify_container"] = *body.NotifyContainer
 	}
 
-	h.db.Model(&cfg).Updates(updates)
-	h.mon.ReloadBot()
+	if err := h.db.Model(&cfg).Updates(updates).Error; err != nil {
+		writeErr(w, "Could not save monitor configuration.", "storage_unavailable", 503)
+		return
+	}
+	if h.mon != nil {
+		h.mon.ReloadBot()
+	}
 
 	h.db.First(&cfg, "id = ?", "default")
-	if cfg.TelegramToken != "" {
-		cfg.TelegramToken = "••••" + cfg.TelegramToken[max(0, len(cfg.TelegramToken)-4):]
+	if cfg.TelegramTokenEnc != "" {
+		cfg.TelegramToken = "Configured"
 	}
 	writeJSON(w, cfg, http.StatusOK)
 }
@@ -95,13 +130,19 @@ func (h *MonitorHandler) TestTelegram(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "config not found", "not_found", http.StatusNotFound)
 		return
 	}
-	if !cfg.TelegramEnabled || cfg.TelegramToken == "" || cfg.TelegramChatID == "" {
+	if !cfg.TelegramEnabled || cfg.TelegramTokenEnc == "" || cfg.TelegramChatID == "" {
 		writeErr(w, "Telegram not configured", "not_configured", http.StatusBadRequest)
 		return
 	}
-	bot := monitor.NewBot(cfg.TelegramToken, cfg.TelegramChatID)
+	token, err := nexuscrypto.DecryptNotificationToken(h.key, cfg.ID, cfg.TelegramTokenEnc)
+	defer clear(token)
+	if err != nil {
+		writeErr(w, "Notification credential unavailable.", "storage_unavailable", 503)
+		return
+	}
+	bot := monitor.NewBot(string(token), cfg.TelegramChatID)
 	if err := bot.Test(); err != nil {
-		writeErr(w, err.Error(), "telegram_error", http.StatusBadGateway)
+		writeErr(w, "Telegram delivery failed. Check the configured token, destination and network.", "telegram_error", http.StatusBadGateway)
 		return
 	}
 	writeJSON(w, map[string]string{"ok": "message sent"}, http.StatusOK)
@@ -122,7 +163,7 @@ func (h *MonitorHandler) AddMonitored(w http.ResponseWriter, r *http.Request) {
 		ContainerID string `json:"containerId"`
 		Name        string `json:"name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ContainerID == "" {
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || !containerIDRe.MatchString(body.ContainerID) {
 		writeErr(w, "containerId required", "bad_request", http.StatusBadRequest)
 		return
 	}
@@ -131,9 +172,14 @@ func (h *MonitorHandler) AddMonitored(w http.ResponseWriter, r *http.Request) {
 	}
 	var existing models.MonitoredContainer
 	if h.db.First(&existing, "server_id = ? AND name = ?", serverID, body.Name).Error == nil {
-		h.db.Model(&existing).Update("container_id", body.ContainerID)
+		if err := h.db.Model(&existing).Update("container_id", body.ContainerID).Error; err != nil {
+			writeErr(w, "Could not update monitored container.", "storage_unavailable", 503)
+			return
+		}
 		existing.ContainerID = body.ContainerID
-		go h.mon.SeedContainer(serverID, body.ContainerID, body.Name)
+		if h.mon != nil {
+			go h.mon.SeedContainer(serverID, body.ContainerID, body.Name)
+		}
 		writeJSON(w, existing, http.StatusOK)
 		return
 	}
@@ -146,16 +192,24 @@ func (h *MonitorHandler) AddMonitored(w http.ResponseWriter, r *http.Request) {
 		ContainerID: body.ContainerID,
 		Name:        body.Name,
 	}
-	h.db.Create(&mc)
+	if err := h.db.Create(&mc).Error; err != nil {
+		writeErr(w, "Could not save monitored container.", "storage_unavailable", 503)
+		return
+	}
 
-	go h.mon.SeedContainer(serverID, body.ContainerID, body.Name)
+	if h.mon != nil {
+		go h.mon.SeedContainer(serverID, body.ContainerID, body.Name)
+	}
 
 	writeJSON(w, mc, http.StatusCreated)
 }
 
 func (h *MonitorHandler) RemoveMonitored(w http.ResponseWriter, r *http.Request) {
-	h.db.Delete(&models.MonitoredContainer{},
-		"server_id = ? AND name = ?", chi.URLParam(r, "id"), chi.URLParam(r, "containerId"))
+	if err := h.db.Delete(&models.MonitoredContainer{},
+		"server_id = ? AND name = ?", chi.URLParam(r, "id"), chi.URLParam(r, "containerId")).Error; err != nil {
+		writeErr(w, "Could not remove monitored container.", "storage_unavailable", 503)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -186,9 +240,12 @@ func (h *MonitorHandler) UpdateServerAlerts(w http.ResponseWriter, r *http.Reque
 
 	var existing models.ServerAlertConfig
 	if h.db.First(&existing, "id = ?", serverID).Error != nil {
-		h.db.Create(&body)
+		if err := h.db.Create(&body).Error; err != nil {
+			writeErr(w, "Could not save server alert configuration.", "storage_unavailable", 503)
+			return
+		}
 	} else {
-		h.db.Model(&existing).Updates(map[string]any{
+		if err := h.db.Model(&existing).Updates(map[string]any{
 			"cpu_enabled":     body.CPUEnabled,
 			"cpu_threshold":   body.CPUThreshold,
 			"ram_enabled":     body.RAMEnabled,
@@ -198,15 +255,11 @@ func (h *MonitorHandler) UpdateServerAlerts(w http.ResponseWriter, r *http.Reque
 			"ssl_enabled":     body.SSLEnabled,
 			"ssl_days_before": body.SSLDaysBefore,
 			"updated_at":      body.UpdatedAt,
-		})
+		}).Error; err != nil {
+			writeErr(w, "Could not update server alerts.", "storage_unavailable", 503)
+			return
+		}
 		h.db.First(&body, "id = ?", serverID)
 	}
 	writeJSON(w, body, http.StatusOK)
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

@@ -28,3 +28,30 @@ Thumbs.db
 # Go
 vendor/nexus/internal/static/dist/
 nexus/internal/static/dist/
+# Public documentation site; all other docs remain private local notes.
+/docs/*
+!/docs/site/
+/docs/site/node_modules/
+/docs/site/.vitepress/cache/
+/docs/site/.vitepress/dist/
+
+# Python lab runner bytecode
+__pycache__/
+*.py[cod]
+
+# Private workspace configuration and instruction files
+.aws/
+.codex/
+.claude/
+.agents/
+.cursor/
+.aider*
+**/AGENTS.md
+**/CLAUDE.md
+**/SKILL.md
+.github/copilot-instructions.md
+/NEXUS_2_0_SPECIFICATION.md
+NEXUS_PRIVATE_NETWORKING_SPECIFICATION.md
+
+# Local deployment script output
+/deployment/

@@ -3,21 +3,38 @@ package config
 import (
 	"encoding/base64"
 	"errors"
+	"net"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/joho/godotenv"
 )
 
 type Config struct {
-	PasswordHash  string
-	EncryptionKey []byte
-	Port          string
-	DBPath        string
-	StaticDir     string
-	TOTPSecret    string
-	TOTPEnabled   bool
-	TrustProxy    bool
+	BackupsEnabled              bool
+	BackupWorkRoot              string
+	AutomationEnabled           bool
+	ACME                        ACMEConfig
+	InventoryEnabled            bool
+	VaultEnabled                bool
+	JobSupervisionEnabled       bool
+	OperationSupervisionEnabled bool
+
+	authMu             sync.RWMutex
+	SessionIdleTTL     time.Duration
+	SessionAbsoluteTTL time.Duration
+	PasswordHash       string
+	EncryptionKey      []byte
+	Port               string
+	BindAddress        string
+	DBPath             string
+	StaticDir          string
+	TOTPSecret         string
+	TOTPEnabled        bool
+	TrustProxy         bool
 }
 
 func Load() (*Config, error) {
@@ -41,15 +58,49 @@ func Load() (*Config, error) {
 	if port == "" {
 		port = "8080"
 	}
+	bindAddress := os.Getenv("NEXUS_BIND_ADDRESS")
+	if bindAddress != "" && net.ParseIP(bindAddress) == nil {
+		return nil, errors.New("NEXUS_BIND_ADDRESS must be an IP address")
+	}
 	dbPath := os.Getenv("NEXUS_DB_PATH")
 	if dbPath == "" {
 		dbPath = "nexus.db"
 	}
 
+	idle, absolute := 12*time.Hour, 7*24*time.Hour
+	for name, target := range map[string]*time.Duration{"NEXUS_SESSION_IDLE_TTL": &idle, "NEXUS_SESSION_ABSOLUTE_TTL": &absolute} {
+		if value := os.Getenv(name); value != "" {
+			duration, err := time.ParseDuration(value)
+			if err != nil || duration < time.Minute || duration > 30*24*time.Hour {
+				return nil, errors.New(name + " must be between 1m and 720h")
+			}
+			*target = duration
+		}
+	}
+	if idle > absolute {
+		return nil, errors.New("session idle TTL must not exceed absolute TTL")
+	}
+	acme := ACMEConfig{DirectoryURL: os.Getenv("NEXUS_ACME_DIRECTORY_URL"), CAFile: os.Getenv("NEXUS_ACME_CA_FILE")}
+	if err := acme.Validate(); err != nil {
+		return nil, err
+	}
+	if root := os.Getenv("NEXUS_BACKUP_WORK_ROOT"); root != "" && (!filepath.IsAbs(root) || filepath.Clean(root) != root || root == "/" || strings.ContainsAny(root, "\x00\r\n")) {
+		return nil, errors.New("NEXUS_BACKUP_WORK_ROOT must be an absolute private directory")
+	}
 	return &Config{
+		BackupsEnabled:              os.Getenv("NEXUS_ENABLE_BACKUPS") == "true",
+		BackupWorkRoot:              os.Getenv("NEXUS_BACKUP_WORK_ROOT"),
+		AutomationEnabled:           os.Getenv("NEXUS_ENABLE_AUTOMATION") == "true",
+		ACME:                        acme,
+		VaultEnabled:                os.Getenv("NEXUS_ENABLE_VAULT") == "true",
+		InventoryEnabled:            os.Getenv("NEXUS_ENABLE_INVENTORY") == "true",
+		JobSupervisionEnabled:       os.Getenv("NEXUS_ENABLE_JOB_SUPERVISION") == "true",
+		OperationSupervisionEnabled: os.Getenv("NEXUS_ENABLE_OPERATION_SUPERVISION") == "true",
+		SessionIdleTTL:              idle, SessionAbsoluteTTL: absolute,
 		PasswordHash:  hash,
 		EncryptionKey: key,
 		Port:          port,
+		BindAddress:   bindAddress,
 		DBPath:        dbPath,
 		StaticDir:     os.Getenv("NEXUS_STATIC_DIR"),
 		TOTPSecret:    os.Getenv("NEXUS_TOTP_SECRET"),
@@ -59,7 +110,9 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) UpdatePasswordHash(newHash string) error {
-	if err := setEnvValue("NEXUS_PASSWORD_HASH", "'"+newHash+"'"); err != nil {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	if err := setEnvValues(map[string]string{"NEXUS_PASSWORD_HASH": "'" + newHash + "'"}); err != nil {
 		return err
 	}
 	c.PasswordHash = newHash
@@ -67,14 +120,13 @@ func (c *Config) UpdatePasswordHash(newHash string) error {
 }
 
 func (c *Config) UpdateTOTP(secret string, enabled bool) error {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
 	enabledStr := "false"
 	if enabled {
 		enabledStr = "true"
 	}
-	if err := setEnvValue("NEXUS_TOTP_SECRET", secret); err != nil {
-		return err
-	}
-	if err := setEnvValue("NEXUS_TOTP_ENABLED", enabledStr); err != nil {
+	if err := setEnvValues(map[string]string{"NEXUS_TOTP_SECRET": secret, "NEXUS_TOTP_ENABLED": enabledStr}); err != nil {
 		return err
 	}
 	c.TOTPSecret = secret
@@ -82,26 +134,46 @@ func (c *Config) UpdateTOTP(secret string, enabled bool) error {
 	return nil
 }
 
-func setEnvValue(key, value string) error {
+func setEnvValues(values map[string]string) error {
 	const envFile = ".env"
-	content := ""
-	if data, err := os.ReadFile(envFile); err == nil {
-		content = string(data)
+	data, err := os.ReadFile(envFile)
+	if err != nil && !os.IsNotExist(err) {
+		return err
 	}
-
-	lines := strings.Split(content, "\n")
-	found := false
-	for i, line := range lines {
-		if strings.HasPrefix(line, key+"=") || strings.HasPrefix(line, key+"='") {
-			lines[i] = key + "=" + value
-			found = true
+	lines := strings.Split(string(data), "\n")
+	for key, value := range values {
+		found := false
+		for i, line := range lines {
+			if strings.HasPrefix(line, key+"=") {
+				lines[i] = key + "=" + value
+				found = true
+			}
+		}
+		if !found {
+			lines = append(lines, key+"="+value)
 		}
 	}
-	if !found {
-		lines = append(lines, key+"="+value)
+	temp, err := os.CreateTemp(filepath.Dir(envFile), ".nexus-env-*")
+	if err != nil {
+		return err
 	}
-	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
-		lines = lines[:len(lines)-1]
+	defer os.Remove(temp.Name())
+	if _, err := temp.WriteString(strings.Join(lines, "\n") + "\n"); err != nil {
+		temp.Close()
+		return err
 	}
-	return os.WriteFile(envFile, []byte(strings.Join(lines, "\n")+"\n"), 0600)
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temp.Name(), envFile)
+}
+
+func (c *Config) AuthSnapshot() (string, string, bool) {
+	c.authMu.RLock()
+	defer c.authMu.RUnlock()
+	return c.PasswordHash, c.TOTPSecret, c.TOTPEnabled
 }

@@ -9,7 +9,9 @@ import (
 	"io"
 )
 
-func Encrypt(key, plaintext []byte) (string, error) {
+func Encrypt(key, plaintext []byte) (string, error) { return EncryptBound(key, plaintext, nil) }
+
+func EncryptBound(key, plaintext, associated []byte) (string, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
@@ -22,10 +24,12 @@ func Encrypt(key, plaintext []byte) (string, error) {
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", err
 	}
-	return base64.StdEncoding.EncodeToString(gcm.Seal(nonce, nonce, plaintext, nil)), nil
+	return base64.StdEncoding.EncodeToString(gcm.Seal(nonce, nonce, plaintext, associated)), nil
 }
 
-func Decrypt(key []byte, encoded string) ([]byte, error) {
+func Decrypt(key []byte, encoded string) ([]byte, error) { return DecryptBound(key, encoded, nil) }
+
+func DecryptBound(key []byte, encoded string, associated []byte) ([]byte, error) {
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return nil, err
@@ -42,5 +46,5 @@ func Decrypt(key []byte, encoded string) ([]byte, error) {
 		return nil, errors.New("ciphertext too short")
 	}
 	nonce, ciphertext := data[:gcm.NonceSize()], data[gcm.NonceSize():]
-	return gcm.Open(nil, nonce, ciphertext, nil)
+	return gcm.Open(nil, nonce, ciphertext, associated)
 }

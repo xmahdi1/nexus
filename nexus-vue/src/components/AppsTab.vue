@@ -1,193 +1,292 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { toast } from 'vue-sonner'
-import { Search, Plus, Trash2, Loader2, Terminal, Package, ExternalLink, Pencil, X, RefreshCw } from '@lucide/vue'
-import { api } from '@/lib/api'
-import type { AppTemplate, DeployedApp } from '@/lib/api'
-import Button from '@/components/ui/Button.vue'
-import Input from '@/components/ui/Input.vue'
-import Label from '@/components/ui/Label.vue'
-import { useConfirm } from '@/composables/useConfirm'
+import { toolEnabled } from '@/lib/tool-preferences';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { toast } from 'vue-sonner';
+import {
+  Search,
+  Plus,
+  Trash2,
+  Loader2,
+  Terminal,
+  Package,
+  ExternalLink,
+  Pencil,
+  X,
+  RefreshCw,
+} from '@lucide/vue';
+import { api } from '@/lib/api';
+import { can } from '@/lib/auth';
+import RunnerSetup from '@/components/RunnerSetup.vue';
+import type { AppTemplate, TemplateVar, DeployedApp } from '@/lib/api';
+import Button from '@/components/ui/Button.vue';
+import Input from '@/components/ui/Input.vue';
+import Label from '@/components/ui/Label.vue';
+import { useConfirm } from '@/composables/useConfirm';
 
-const props  = defineProps<{ serverId: string }>()
-const { confirm } = useConfirm()
+const showRunner = ref(false);
+const props = defineProps<{ serverId: string }>();
+const { confirm } = useConfirm();
 
-const VAR_TYPES = ['string', 'password', 'number', 'select']
+const VAR_TYPES = ['string', 'password', 'number', 'select'];
 
-const isDark      = ref(document.documentElement.classList.contains('dark'))
-const templates   = ref<AppTemplate[]>([])
-const deployed    = ref<DeployedApp[]>([])
-const loading     = ref(true)
-const search      = ref('')
-const activeCategory = ref('All')
+const isDark = ref(document.documentElement.classList.contains('dark'));
+const templates = ref<AppTemplate[]>([]);
+const deployed = ref<DeployedApp[]>([]);
+const loading = ref(true);
+const search = ref('');
+const activeCategory = ref('All');
 
-const deploying     = ref(false)
-const deployOutput  = ref('')
-const deployDone    = ref(false)
-const postDeploy    = ref('')
-const selectedTpl   = ref<AppTemplate | null>(null)
-const deployVars    = ref<Record<string, string>>({})
-const deployName    = ref('')
+const deploying = ref(false);
+const deployOutput = ref('');
+const deployDone = ref(false);
+const postDeploy = ref('');
+const selectedTpl = ref<AppTemplate | null>(null);
+const deployVars = ref<Record<string, string>>({});
+const deployName = ref('');
 
-const showCustom      = ref(false)
-const editingCustomId = ref<string | null>(null)
-const customSaving    = ref(false)
+const showCustom = ref(false);
+const editingCustomId = ref<string | null>(null);
+const customSaving = ref(false);
 const customForm = ref({
-  name: '', icon: '📦', category: '', description: '',
-  docUrl: '', postDeploy: '', compose: '',
-  vars: [] as Array<{ name: string; label: string; type: string; default: string; required: boolean; description: string }>,
-})
+  name: '',
+  icon: '📦',
+  category: '',
+  description: '',
+  docUrl: '',
+  postDeploy: '',
+  compose: '',
+  vars: [] as TemplateVar[],
+});
 
-let themeObserver: MutationObserver | null = null
+let themeObserver: MutationObserver | null = null;
 
 const categories = computed(() => {
-  const cats = new Set(templates.value.map(t => t.category))
-  return ['All', ...Array.from(cats).sort()]
-})
+  const cats = new Set(templates.value.map((t) => t.category));
+  return ['All', ...Array.from(cats).sort()];
+});
 
 const filtered = computed(() => {
-  let list = templates.value
-  if (activeCategory.value !== 'All')
-    list = list.filter(t => t.category === activeCategory.value)
+  let list = templates.value.filter(
+    (t) => (t.id !== 'github-runner' || toolEnabled('runners')) && (t.id !== 'vault' || toolEnabled('vault')),
+  );
+  if (activeCategory.value !== 'All') list = list.filter((t) => t.category === activeCategory.value);
   if (search.value)
-    list = list.filter(t =>
+    list = list.filter(
+      (t) =>
         t.name.toLowerCase().includes(search.value.toLowerCase()) ||
-        t.description.toLowerCase().includes(search.value.toLowerCase()))
-  return list
-})
+        t.description.toLowerCase().includes(search.value.toLowerCase()),
+    );
+  return list;
+});
 
 function getIcon(tpl: AppTemplate) {
-  return isDark.value && tpl.iconLight ? tpl.iconLight : tpl.icon
+  return isDark.value && tpl.iconLight ? tpl.iconLight : tpl.icon;
 }
 
-function isUrl(s: string) { return s?.startsWith('/') || s?.startsWith('http') }
+function isUrl(s: string) {
+  return s?.startsWith('/') || s?.startsWith('http');
+}
 
 function openDeploy(tpl: AppTemplate) {
-  selectedTpl.value  = tpl
-  deployName.value   = tpl.id
-  deployOutput.value = ''
-  deployDone.value   = false
-  postDeploy.value   = ''
-  const vars: Record<string, string> = {}
-  for (const v of tpl.vars || []) vars[v.name] = v.default || ''
-  deployVars.value = vars
+  if (tpl.setupKind === 'github-runner') {
+    showRunner.value = true;
+    return;
+  }
+  selectedTpl.value = tpl;
+  deployName.value = tpl.id;
+  deployOutput.value = '';
+  deployDone.value = false;
+  postDeploy.value = '';
+  const vars: Record<string, string> = {};
+  for (const v of tpl.vars || []) vars[v.name] = v.default || '';
+  deployVars.value = vars;
 }
 
-function closeDeploy() { selectedTpl.value = null; deployOutput.value = ''; deployDone.value = false }
+function closeDeploy() {
+  selectedTpl.value = null;
+  deployOutput.value = '';
+  deployDone.value = false;
+}
 
 async function load() {
-  try { deployed.value = await api.templates.listDeployed(props.serverId) }
-  catch {}
+  try {
+    deployed.value = await api.templates.listDeployed(props.serverId);
+  } catch {
+    deployed.value = [];
+  }
 }
 
 async function runDeploy() {
-  if (!selectedTpl.value) return
-  deploying.value    = true
-  deployOutput.value = ''
+  if (!selectedTpl.value) return;
+  if (
+    !(await confirm({
+      title: 'Deploy application?',
+      message: `Deploy ${deployName.value} on ${props.serverId}? The template can create services and persistent data. Inspect any prior failed or uncertain deployment before retrying.`,
+      confirmText: 'Deploy',
+      destructive: true,
+    }))
+  )
+    return;
+  deploying.value = true;
+  deployOutput.value = '';
   try {
     const res = await api.templates.deploy(props.serverId, {
       templateId: selectedTpl.value.id,
-      appName:    deployName.value,
-      variables:  deployVars.value,
-    })
-    deployOutput.value = res.output || ''
-    postDeploy.value   = res.postDeploy || ''
-    deployDone.value   = true
-    deployed.value.unshift(res.app)
-    toast.success(`${selectedTpl.value.name} deployed!`)
+      appName: deployName.value,
+      variables: deployVars.value,
+    });
+    deployOutput.value = res.output || '';
+    postDeploy.value = res.postDeploy || '';
+    deployDone.value = true;
+    deployed.value.unshift(res.app);
+    toast.success(`${selectedTpl.value.name} deployed!`);
   } catch (e: any) {
-    deployOutput.value = e?.output || (e instanceof Error ? e.message : 'Deploy failed')
-    deployDone.value   = true
-    toast.error('Deploy failed — check output')
-  } finally { deploying.value = false }
+    deployOutput.value = e?.output || (e instanceof Error ? e.message : 'Deploy failed');
+    deployDone.value = true;
+    toast.error('Deploy failed — check output');
+  } finally {
+    deploying.value = false;
+  }
 }
 
 async function removeApp(app: DeployedApp) {
   const ok = await confirm({
-    title:       `Remove ${app.name}`,
-    message:     'This will run docker compose down -v and delete the app directory. Cannot be undone.',
-    confirmText: 'Remove', destructive: true,
-  })
-  if (!ok) return
+    title: `Remove ${app.name}`,
+    message:
+      'Stop and unregister this app. Named volumes, application files and the Compose recipe are retained for recovery.',
+    confirmText: 'Remove',
+    destructive: true,
+  });
+  if (!ok) return;
   try {
-    await api.templates.remove(props.serverId, app.id)
-    deployed.value = deployed.value.filter(a => a.id !== app.id)
-    toast.success(`${app.name} removed`)
-  } catch (e) { toast.error(e instanceof Error ? e.message : 'Failed') }
+    await api.templates.remove(props.serverId, app.id);
+    deployed.value = deployed.value.filter((a) => a.id !== app.id);
+    toast.success(`${app.name} removed`);
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : 'Failed');
+  }
 }
 
 function openCustomCreate() {
-  editingCustomId.value = null
-  customForm.value = { name: '', icon: '📦', category: '', description: '', docUrl: '', postDeploy: '', compose: '', vars: [] }
-  showCustom.value = true
+  editingCustomId.value = null;
+  customForm.value = {
+    name: '',
+    icon: '📦',
+    category: '',
+    description: '',
+    docUrl: '',
+    postDeploy: '',
+    compose: '',
+    vars: [],
+  };
+  showCustom.value = true;
 }
 
-function openCustomEdit(tpl: AppTemplate) {
-  editingCustomId.value = tpl.id
-  customForm.value = {
-    name: tpl.name, icon: tpl.icon, category: tpl.category,
-    description: tpl.description, docUrl: tpl.docUrl || '',
-    postDeploy: tpl.postDeploy || '', compose: (tpl as any).compose || '',
-    vars: (tpl.vars || []).map(v => ({ ...v })),
+async function openCustomEdit(tpl: AppTemplate) {
+  try {
+    const source = await api.templates.getCustom(tpl.id);
+    editingCustomId.value = source.id;
+    customForm.value = {
+      name: source.name,
+      icon: source.icon,
+      category: source.category,
+      description: source.description,
+      docUrl: source.docUrl || '',
+      postDeploy: source.postDeploy || '',
+      compose: source.compose,
+      vars: source.vars.map((v) => ({ ...v })),
+    };
+    showCustom.value = true;
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : 'Protected template unavailable');
   }
-  showCustom.value = true
 }
 
 function addVar() {
-  customForm.value.vars.push({ name: '', label: '', type: 'string', default: '', required: false, description: '' })
+  customForm.value.vars.push({
+    name: '',
+    label: '',
+    type: 'string',
+    default: '',
+    required: false,
+    description: '',
+  });
 }
 
-function removeVar(i: number) { customForm.value.vars.splice(i, 1) }
+function removeVar(i: number) {
+  customForm.value.vars.splice(i, 1);
+}
 
 async function saveCustom() {
-  if (!customForm.value.name || !customForm.value.compose) { toast.error('Name and Compose YAML are required'); return }
-  customSaving.value = true
+  if (!customForm.value.name || !customForm.value.compose) {
+    toast.error('Name and Compose YAML are required');
+    return;
+  }
+  customSaving.value = true;
   try {
     if (editingCustomId.value) {
-      const updated = await api.templates.updateCustom(editingCustomId.value, customForm.value)
-      const idx = templates.value.findIndex(t => t.id === editingCustomId.value)
-      if (idx >= 0) templates.value[idx] = { ...updated, builtIn: false }
+      await api.templates.updateCustom(editingCustomId.value, customForm.value);
     } else {
-      const created = await api.templates.createCustom(customForm.value)
-      templates.value.push({ ...created, builtIn: false, vars: customForm.value.vars })
+      await api.templates.createCustom(customForm.value);
     }
-    showCustom.value = false
-    toast.success('Template saved')
-  } catch (e) { toast.error(e instanceof Error ? e.message : 'Failed') }
-  finally { customSaving.value = false }
+    templates.value = await api.templates.list();
+    showCustom.value = false;
+    toast.success('Template saved');
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : 'Failed');
+  } finally {
+    customSaving.value = false;
+  }
 }
 
 async function deleteCustom(tpl: AppTemplate) {
   const ok = await confirm({
     title: `Delete template "${tpl.name}"?`,
     message: 'This only removes the template, not any deployed apps.',
-    confirmText: 'Delete', destructive: true,
-  })
-  if (!ok) return
+    confirmText: 'Delete',
+    destructive: true,
+  });
+  if (!ok) return;
   try {
-    await api.templates.deleteCustom(tpl.id)
-    templates.value = templates.value.filter(t => t.id !== tpl.id)
-    toast.success('Template deleted')
-  } catch (e) { toast.error(e instanceof Error ? e.message : 'Failed') }
+    await api.templates.deleteCustom(tpl.id);
+    templates.value = templates.value.filter((t) => t.id !== tpl.id);
+    toast.success('Template deleted');
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : 'Failed');
+  }
 }
 
 onMounted(async () => {
   themeObserver = new MutationObserver(() => {
-    isDark.value = document.documentElement.classList.contains('dark')
-  })
-  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+    isDark.value = document.documentElement.classList.contains('dark');
+  });
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
   try {
-    templates.value = await api.templates.list()
-    await load()
-  } catch { toast.error('Failed to load templates') }
-  finally { loading.value = false }
-})
+    templates.value = await api.templates.list();
+    await load();
+  } catch {
+    toast.error('Failed to load templates');
+  } finally {
+    loading.value = false;
+  }
+});
 
-onUnmounted(() => themeObserver?.disconnect())
+onUnmounted(() => themeObserver?.disconnect());
 </script>
 
 <template>
   <div class="space-y-6">
+    <RunnerSetup
+      v-if="showRunner && toolEnabled('runners')"
+      :server-id="serverId"
+      @close="showRunner = false"
+    />
+    <Button
+      v-if="toolEnabled('runners') && can('github.runners.read', serverId)"
+      variant="outline"
+      @click="showRunner = true"
+      >Manage GitHub runners</Button
+    >
 
     <div class="space-y-3">
       <div class="flex items-center justify-between">
@@ -201,10 +300,17 @@ onUnmounted(() => themeObserver?.disconnect())
         <Input v-model="search" class="pl-9" placeholder="Search templates…" />
       </div>
       <div class="flex items-center gap-2 flex-wrap pb-1">
-        <button v-for="cat in categories" :key="cat"
-                :class="['px-3 py-1.5 rounded-lg text-xs font-medium transition-colors shrink-0',
-            activeCategory === cat ? 'bg-primary text-primary-foreground' : 'bg-muted hover:bg-muted/80 text-muted-foreground']"
-                @click="activeCategory = cat">
+        <button
+          v-for="cat in categories"
+          :key="cat"
+          :class="[
+            'px-3 py-1.5 rounded-lg text-xs font-medium transition-colors shrink-0',
+            activeCategory === cat
+              ? 'bg-primary text-primary-foreground'
+              : 'bg-muted hover:bg-muted/80 text-muted-foreground',
+          ]"
+          @click="activeCategory = cat"
+        >
           {{ cat }}
         </button>
       </div>
@@ -215,26 +321,39 @@ onUnmounted(() => themeObserver?.disconnect())
     </div>
 
     <div v-else class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-      <div v-for="tpl in filtered" :key="tpl.id"
-           class="group relative bg-card border rounded-xl p-3 sm:p-4 cursor-pointer
-               hover:border-primary/50 hover:shadow-md transition-all duration-200 space-y-3"
-           @click="openDeploy(tpl)">
-
-        <div v-if="!tpl.builtIn" class="absolute top-2 right-2 hidden group-hover:flex gap-1 z-10" @click.stop>
-          <button class="h-6 w-6 rounded bg-background/80 backdrop-blur flex items-center justify-center hover:bg-muted"
-                  @click="openCustomEdit(tpl)">
+      <div
+        v-for="tpl in filtered"
+        :key="tpl.id"
+        class="group relative bg-card border rounded-xl p-3 sm:p-4 cursor-pointer hover:border-primary/50 hover:shadow-md transition-all duration-200 space-y-3"
+        @click="openDeploy(tpl)"
+      >
+        <div
+          v-if="!tpl.builtIn"
+          class="absolute top-2 right-2 hidden group-hover:flex gap-1 z-10"
+          @click.stop
+        >
+          <button
+            class="h-6 w-6 rounded bg-background/80 backdrop-blur flex items-center justify-center hover:bg-muted"
+            @click="openCustomEdit(tpl)"
+          >
             <Pencil class="h-3 w-3" />
           </button>
-          <button class="h-6 w-6 rounded bg-background/80 backdrop-blur flex items-center justify-center hover:bg-destructive/10 text-destructive"
-                  @click="deleteCustom(tpl)">
+          <button
+            class="h-6 w-6 rounded bg-background/80 backdrop-blur flex items-center justify-center hover:bg-destructive/10 text-destructive"
+            @click="deleteCustom(tpl)"
+          >
             <Trash2 class="h-3 w-3" />
           </button>
         </div>
 
         <div class="h-9 w-9 sm:h-10 sm:w-10">
-          <img v-if="isUrl(getIcon(tpl))" :src="getIcon(tpl)" :alt="tpl.name"
-               class="h-full w-full rounded-xl object-contain"
-               @error="($event.target as HTMLImageElement).style.opacity = '0'" />
+          <img
+            v-if="isUrl(getIcon(tpl))"
+            :src="getIcon(tpl)"
+            :alt="tpl.name"
+            class="h-full w-full rounded-xl object-contain"
+            @error="($event.target as HTMLImageElement).style.opacity = '0'"
+          />
           <span v-else class="text-2xl sm:text-3xl leading-none">{{ tpl.icon }}</span>
         </div>
 
@@ -243,7 +362,9 @@ onUnmounted(() => themeObserver?.disconnect())
           <p class="text-xs text-muted-foreground mt-0.5 line-clamp-2">{{ tpl.description }}</p>
         </div>
         <div class="flex items-center justify-between">
-          <span class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-medium">{{ tpl.category }}</span>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-medium">{{
+            tpl.category
+          }}</span>
           <span v-if="!tpl.builtIn" class="text-[10px] text-primary font-medium">custom</span>
         </div>
       </div>
@@ -257,7 +378,9 @@ onUnmounted(() => themeObserver?.disconnect())
       <div class="flex items-center gap-2">
         <h3 class="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Deployed apps</h3>
         <div class="flex-1 h-px bg-border" />
-        <p class="text-[10px] text-muted-foreground hidden sm:block">Status reflects last deploy — check Containers tab for live state</p>
+        <p class="text-[10px] text-muted-foreground hidden sm:block">
+          Status reflects last deploy — check Containers tab for live state
+        </p>
         <Button size="sm" variant="ghost" class="h-6 gap-1 text-xs" @click="load">
           <RefreshCw class="h-3 w-3" />Sync
         </Button>
@@ -265,63 +388,117 @@ onUnmounted(() => themeObserver?.disconnect())
       <div class="border rounded-xl overflow-hidden">
         <table class="w-full text-sm">
           <thead>
-          <tr class="border-b bg-muted/40">
-            <th class="text-left px-4 py-2.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">App</th>
-            <th class="text-left px-4 py-2.5 text-xs font-medium text-muted-foreground uppercase tracking-wide hidden sm:table-cell">Path</th>
-            <th class="text-left px-4 py-2.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">Status</th>
-            <th class="text-left px-4 py-2.5 text-xs font-medium text-muted-foreground uppercase tracking-wide hidden sm:table-cell">Deployed</th>
-            <th class="text-right px-4 py-2.5 w-12" />
-          </tr>
+            <tr class="border-b bg-muted/40">
+              <th
+                class="text-left px-4 py-2.5 text-xs font-medium text-muted-foreground uppercase tracking-wide"
+              >
+                App
+              </th>
+              <th
+                class="text-left px-4 py-2.5 text-xs font-medium text-muted-foreground uppercase tracking-wide hidden sm:table-cell"
+              >
+                Path
+              </th>
+              <th
+                class="text-left px-4 py-2.5 text-xs font-medium text-muted-foreground uppercase tracking-wide"
+              >
+                Status
+              </th>
+              <th
+                class="text-left px-4 py-2.5 text-xs font-medium text-muted-foreground uppercase tracking-wide hidden sm:table-cell"
+              >
+                Deployed
+              </th>
+              <th class="text-right px-4 py-2.5 w-12" />
+            </tr>
           </thead>
           <tbody>
-          <tr v-for="app in deployed" :key="app.id" class="border-b last:border-0 hover:bg-muted/10 transition-colors">
-            <td class="px-4 py-3 font-medium text-sm">{{ app.name }}</td>
-            <td class="px-4 py-3 font-mono text-xs text-muted-foreground hidden sm:table-cell">{{ app.composePath }}</td>
-            <td class="px-4 py-3">
-                <span :class="['text-xs font-medium px-2 py-0.5 rounded-full',
-                  app.status === 'running' ? 'bg-green-500/10 text-green-600' :
-                  app.status === 'failed'  ? 'bg-red-500/10 text-red-600' :
-                  'bg-muted text-muted-foreground']">
+            <tr
+              v-for="app in deployed"
+              :key="app.id"
+              class="border-b last:border-0 hover:bg-muted/10 transition-colors"
+            >
+              <td class="px-4 py-3 font-medium text-sm">{{ app.name }}</td>
+              <td class="px-4 py-3 font-mono text-xs text-muted-foreground hidden sm:table-cell">
+                {{ app.composePath }}
+              </td>
+              <td class="px-4 py-3">
+                <span
+                  :class="[
+                    'text-xs font-medium px-2 py-0.5 rounded-full',
+                    app.status === 'running'
+                      ? 'bg-green-500/10 text-green-600'
+                      : app.status === 'failed'
+                        ? 'bg-red-500/10 text-red-600'
+                        : 'bg-muted text-muted-foreground',
+                  ]"
+                >
                   {{ app.status }}
                 </span>
-            </td>
-            <td class="px-4 py-3 text-xs text-muted-foreground hidden sm:table-cell">
-              {{ new Date(app.deployedAt).toLocaleDateString() }}
-            </td>
-            <td class="px-4 py-3 text-right">
-              <Button size="icon" variant="ghost" class="h-7 w-7 text-destructive hover:text-destructive" @click="removeApp(app)">
-                <Trash2 class="h-3.5 w-3.5" />
-              </Button>
-            </td>
-          </tr>
+              </td>
+              <td class="px-4 py-3 text-xs text-muted-foreground hidden sm:table-cell">
+                {{ new Date(app.deployedAt).toLocaleDateString() }}
+              </td>
+              <td class="px-4 py-3 text-right">
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  class="h-7 w-7 text-destructive hover:text-destructive"
+                  @click="removeApp(app)"
+                >
+                  <Trash2 class="h-3.5 w-3.5" />
+                </Button>
+              </td>
+            </tr>
           </tbody>
         </table>
       </div>
     </div>
-
   </div>
 
-  <Transition enter-active-class="transition-opacity duration-150" enter-from-class="opacity-0"
-              leave-active-class="transition-opacity duration-100" leave-to-class="opacity-0">
-    <div v-if="selectedTpl" class="fixed inset-0 z-[200] flex items-end sm:items-center justify-center sm:p-4">
+  <Transition
+    enter-active-class="transition-opacity duration-150"
+    enter-from-class="opacity-0"
+    leave-active-class="transition-opacity duration-100"
+    leave-to-class="opacity-0"
+  >
+    <div
+      v-if="selectedTpl"
+      class="fixed inset-0 z-[200] flex items-end sm:items-center justify-center sm:p-4"
+    >
       <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="!deploying && closeDeploy()" />
-      <div class="relative z-10 w-full sm:max-w-lg bg-card border sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col max-h-[92vh]">
-
+      <div
+        class="relative z-10 w-full sm:max-w-lg bg-card border sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col max-h-[92vh]"
+      >
         <div class="flex items-center gap-3 p-4 sm:p-6 border-b">
           <div class="h-10 w-10 shrink-0">
-            <img v-if="isUrl(getIcon(selectedTpl))" :src="getIcon(selectedTpl)" :alt="selectedTpl.name"
-                 class="h-10 w-10 rounded-xl object-contain" />
+            <img
+              v-if="isUrl(getIcon(selectedTpl))"
+              :src="getIcon(selectedTpl)"
+              :alt="selectedTpl.name"
+              class="h-10 w-10 rounded-xl object-contain"
+            />
             <span v-else class="text-3xl">{{ selectedTpl.icon }}</span>
           </div>
           <div class="flex-1 min-w-0">
             <p class="font-semibold">Deploy {{ selectedTpl.name }}</p>
             <p class="text-xs text-muted-foreground truncate">{{ selectedTpl.description }}</p>
           </div>
-          <a v-if="selectedTpl.docUrl" :href="selectedTpl.docUrl" target="_blank" rel="noopener"
-             class="text-muted-foreground hover:text-foreground" @click.stop>
+          <a
+            v-if="selectedTpl.docUrl"
+            :href="selectedTpl.docUrl"
+            target="_blank"
+            rel="noopener"
+            class="text-muted-foreground hover:text-foreground"
+            @click.stop
+          >
             <ExternalLink class="h-4 w-4" />
           </a>
-          <button class="text-muted-foreground hover:text-foreground" :disabled="deploying" @click="closeDeploy()">
+          <button
+            class="text-muted-foreground hover:text-foreground"
+            :disabled="deploying"
+            @click="closeDeploy()"
+          >
             <X class="h-4 w-4" />
           </button>
         </div>
@@ -333,15 +510,24 @@ onUnmounted(() => themeObserver?.disconnect())
           </div>
           <template v-if="selectedTpl.vars?.length">
             <div v-for="v in selectedTpl.vars" :key="v.name" class="space-y-1.5">
-              <Label>{{ v.label }}<span v-if="v.required" class="text-destructive ml-0.5">*</span></Label>
-              <select v-if="v.type === 'select'" v-model="deployVars[v.name]"
-                      class="w-full h-9 px-3 rounded-md border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/50">
+              <Label
+                >{{ v.label
+                }}<span v-if="v.required && !v.storedDefault" class="text-destructive ml-0.5">*</span></Label
+              >
+              <select
+                v-if="v.type === 'select'"
+                v-model="deployVars[v.name]"
+                class="w-full h-9 px-3 rounded-md border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+              >
                 <option v-for="opt in v.options" :key="opt" :value="opt">{{ opt }}</option>
               </select>
-              <Input v-else v-model="deployVars[v.name]"
-                     :type="v.type === 'password' ? 'password' : v.type === 'number' ? 'number' : 'text'"
-                     :placeholder="v.default || v.label"
-                     :class="['text-sm', v.type === 'password' || v.type === 'number' ? 'font-mono' : '']" />
+              <Input
+                v-else
+                v-model="deployVars[v.name]"
+                :type="v.type === 'password' ? 'password' : v.type === 'number' ? 'number' : 'text'"
+                :placeholder="v.storedDefault ? 'Stored default (leave blank to use)' : v.default || v.label"
+                :class="['text-sm', v.type === 'password' || v.type === 'number' ? 'font-mono' : '']"
+              />
               <p v-if="v.description" class="text-xs text-muted-foreground">{{ v.description }}</p>
             </div>
           </template>
@@ -351,11 +537,15 @@ onUnmounted(() => themeObserver?.disconnect())
           <div class="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
             <Terminal class="h-3.5 w-3.5" />Output
           </div>
-          <pre class="text-xs font-mono bg-muted rounded-lg px-4 py-3 max-h-40 overflow-y-auto whitespace-pre-wrap">{{ deployOutput }}</pre>
+          <pre
+            class="text-xs font-mono bg-muted rounded-lg px-4 py-3 max-h-40 overflow-y-auto whitespace-pre-wrap"
+            >{{ deployOutput }}</pre>
         </div>
 
-        <div v-if="postDeploy && deployDone"
-             class="mx-4 sm:mx-6 mt-3 bg-green-500/10 border border-green-500/20 rounded-lg px-4 py-3 text-xs text-green-700 dark:text-green-400">
+        <div
+          v-if="postDeploy && deployDone"
+          class="mx-4 sm:mx-6 mt-3 bg-green-500/10 border border-green-500/20 rounded-lg px-4 py-3 text-xs text-green-700 dark:text-green-400"
+        >
           {{ postDeploy }}
         </div>
 
@@ -374,11 +564,17 @@ onUnmounted(() => themeObserver?.disconnect())
     </div>
   </Transition>
 
-  <Transition enter-active-class="transition-opacity duration-150" enter-from-class="opacity-0"
-              leave-active-class="transition-opacity duration-100" leave-to-class="opacity-0">
+  <Transition
+    enter-active-class="transition-opacity duration-150"
+    enter-from-class="opacity-0"
+    leave-active-class="transition-opacity duration-100"
+    leave-to-class="opacity-0"
+  >
     <div v-if="showCustom" class="fixed inset-0 z-[200] flex items-end sm:items-center justify-center sm:p-4">
       <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="showCustom = false" />
-      <div class="relative z-10 w-full sm:max-w-2xl bg-card border sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col max-h-[92vh]">
+      <div
+        class="relative z-10 w-full sm:max-w-2xl bg-card border sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col max-h-[92vh]"
+      >
         <div class="flex items-center justify-between p-4 sm:p-6 border-b">
           <h3 class="font-semibold">{{ editingCustomId ? 'Edit template' : 'Create custom template' }}</h3>
           <button class="text-muted-foreground hover:text-foreground" @click="showCustom = false">
@@ -416,12 +612,19 @@ onUnmounted(() => themeObserver?.disconnect())
 
           <div class="space-y-2">
             <div class="flex items-center justify-between">
-              <Label>Variables <span class="text-muted-foreground text-xs">— use ${VAR_NAME} in compose</span></Label>
+              <Label
+                >Variables
+                <span class="text-muted-foreground text-xs">— use ${VAR_NAME} in compose</span></Label
+              >
               <Button size="sm" variant="outline" class="gap-1 h-7 text-xs" @click="addVar">
                 <Plus class="h-3 w-3" />Add variable
               </Button>
             </div>
-            <div v-for="(v, i) in customForm.vars" :key="i" class="grid grid-cols-12 gap-2 p-3 bg-muted/30 rounded-lg">
+            <div
+              v-for="(v, i) in customForm.vars"
+              :key="i"
+              class="grid grid-cols-12 gap-2 p-3 bg-muted/30 rounded-lg"
+            >
               <div class="col-span-6 sm:col-span-3">
                 <Input v-model="v.name" placeholder="VAR_NAME" class="font-mono text-xs h-8" />
                 <p class="text-[10px] text-muted-foreground mt-0.5">Key</p>
@@ -431,7 +634,10 @@ onUnmounted(() => themeObserver?.disconnect())
                 <p class="text-[10px] text-muted-foreground mt-0.5">Label</p>
               </div>
               <div class="col-span-4 sm:col-span-2">
-                <select v-model="v.type" class="w-full h-8 px-2 rounded-md border bg-background text-xs focus:outline-none">
+                <select
+                  v-model="v.type"
+                  class="w-full h-8 px-2 rounded-md border bg-background text-xs focus:outline-none"
+                >
                   <option v-for="t in VAR_TYPES" :key="t" :value="t">{{ t }}</option>
                 </select>
                 <p class="text-[10px] text-muted-foreground mt-0.5">Type</p>
@@ -455,16 +661,20 @@ onUnmounted(() => themeObserver?.disconnect())
           </div>
 
           <div class="space-y-1.5">
-            <Label>docker-compose.yml <span class="text-muted-foreground text-xs">— use ${VAR_NAME} for variables</span></Label>
-            <textarea v-model="customForm.compose"
-                      class="w-full h-56 font-mono text-xs bg-background border rounded-lg px-3 py-2.5
-                     focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
-                      placeholder="services:
+            <Label
+              >docker-compose.yml
+              <span class="text-muted-foreground text-xs">— use ${VAR_NAME} for variables</span></Label
+            >
+            <textarea
+              v-model="customForm.compose"
+              class="w-full h-56 font-mono text-xs bg-background border rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
+              placeholder='services:
   myapp:
     image: myapp:latest
     ports:
-      - &quot;${PORT}:8080&quot;"
-                      spellcheck="false" />
+      - "${PORT}:8080"'
+              spellcheck="false"
+            />
           </div>
         </div>
 

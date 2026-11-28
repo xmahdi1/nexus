@@ -1,12 +1,16 @@
 package templates
 
 import (
+	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/xmahdi1/nexus/internal/audit"
 	"net/http"
+	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -24,25 +28,56 @@ type Handler struct {
 }
 
 func NewHandler(db *gorm.DB, encKey []byte, pool *nexusssh.Pool) *Handler {
-	db.AutoMigrate(&models.DeployedApp{}, &models.CustomTemplate{})
 	return &Handler{db: db, encKey: encKey, pool: pool}
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	result := Catalog()
 	var custom []models.CustomTemplate
-	h.db.Find(&custom)
-	for _, c := range custom {
-		var vars []TemplateVar
-		json.Unmarshal([]byte(c.VarsJSON), &vars)
-		result = append(result, AppTemplate{
-			ID: c.ID, Name: c.Name, Icon: c.Icon,
-			Category: c.Category, Description: c.Description,
-			DocURL: c.DocURL, PostDeploy: c.PostDeploy,
-			Vars: vars, BuiltIn: false,
-		})
+	if err := h.db.Find(&custom).Error; err != nil {
+		writeErr(w, "Template catalog unavailable.", 503)
+		return
+	}
+	for _, row := range custom {
+		template, err := h.openCustom(row)
+		if err != nil {
+			writeErr(w, "Template definition unavailable.", 503)
+			return
+		}
+		template.Compose = ""
+		template.PostDeploy = ""
+		for i := range template.Vars {
+			template.Vars[i].StoredDefault = template.Vars[i].Default != ""
+			template.Vars[i].Default = ""
+		}
+		result = append(result, template)
 	}
 	writeJSON(w, result, http.StatusOK)
+}
+
+func (h *Handler) openCustom(row models.CustomTemplate) (AppTemplate, error) {
+	value, err := nexuscrypto.DecryptTemplateDefinition(h.encKey, row.ID, row.DefinitionEnc)
+	if err != nil {
+		return AppTemplate{}, fmt.Errorf("protected template unavailable")
+	}
+	var vars []TemplateVar
+	if value.VarsJSON != "" && json.Unmarshal([]byte(value.VarsJSON), &vars) != nil {
+		return AppTemplate{}, fmt.Errorf("invalid protected variables")
+	}
+	return AppTemplate{ID: row.ID, Name: row.Name, Icon: row.Icon, Category: row.Category, Description: row.Description, DocURL: row.DocURL, Vars: vars, PostDeploy: value.PostDeploy, Compose: value.Compose}, nil
+}
+func (h *Handler) GetCustom(w http.ResponseWriter, r *http.Request) {
+	var row models.CustomTemplate
+	if err := h.db.First(&row, "id=?", chi.URLParam(r, "id")).Error; err != nil {
+		writeErr(w, "Template not found.", 404)
+		return
+	}
+	template, err := h.openCustom(row)
+	if err != nil {
+		writeErr(w, "Protected template unavailable.", 503)
+		return
+	}
+	writeJSON(w, map[string]any{"id": template.ID, "name": template.Name, "icon": template.Icon, "category": template.Category, "description": template.Description, "docUrl": template.DocURL, "vars": template.Vars, "compose": template.Compose, "postDeploy": template.PostDeploy, "builtIn": false}, 200)
 }
 
 func (h *Handler) ListDeployed(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +89,7 @@ func (h *Handler) ListDeployed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if run, err := h.sshRun(serverID); err == nil {
+	if run, err := h.sshRun(r.Context(), serverID); err == nil {
 		if out, _ := run(`docker ps -a --format '{{.Names}} {{.State}}' 2>/dev/null`); out != "" {
 			type ctr struct{ running bool }
 			ctrs := make(map[string]ctr)
@@ -75,7 +110,8 @@ func (h *Handler) ListDeployed(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if matched == nil {
-					h.db.Delete(&apps[i])
+					apps[i].Status = "unknown"
+					keep = append(keep, apps[i])
 					continue
 				}
 				newStatus := "stopped"
@@ -113,31 +149,65 @@ func (h *Handler) Deploy(w http.ResponseWriter, r *http.Request) {
 		body.AppName = body.TemplateID
 	}
 	body.AppName = sanitizeName(body.AppName)
+	if !appNameRe.MatchString(body.AppName) {
+		writeErr(w, "App name must start with a letter or digit and contain 1 to 64 letters, digits or hyphens.", 400)
+		return
+	}
 
 	tpl, err := h.resolveTemplate(body.TemplateID)
 	if err != nil {
 		writeErr(w, "template not found: "+body.TemplateID, http.StatusNotFound)
 		return
 	}
+	if tpl.SetupKind != "" {
+		writeErr(w, "This application requires its dedicated setup flow; credentials cannot be saved as template variables.", 400)
+		return
+	}
 	for _, v := range tpl.Vars {
-		if v.Required && body.Variables[v.Name] == "" {
-			writeErr(w, fmt.Sprintf("variable %q is required", v.Name), http.StatusBadRequest)
-			return
-		}
 		if body.Variables[v.Name] == "" && v.Default != "" {
 			if body.Variables == nil {
 				body.Variables = map[string]string{}
 			}
 			body.Variables[v.Name] = v.Default
 		}
+		if v.Required && body.Variables[v.Name] == "" {
+			writeErr(w, fmt.Sprintf("variable %q is required", v.Name), 400)
+			return
+		}
+	}
+
+	if tpl.ID == "vault" && tpl.BuiltIn {
+		if err := validateVaultVariables(body.Variables); err != nil {
+			writeErr(w, err.Error(), 400)
+			return
+		}
+	}
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		writeErr(w, "Could not allocate deployment identity.", 503)
+		return
+	}
+	appID := hex.EncodeToString(id)
+	varsJSON, err := json.Marshal(body.Variables)
+	if err != nil {
+		writeErr(w, "Invalid deployment variables.", 400)
+		return
+	}
+	encryptedVars, err := nexuscrypto.EncryptDeploymentVariables(h.encKey, appID, serverID, varsJSON)
+	clear(varsJSON)
+	if err != nil {
+		writeErr(w, "Deployment encryption unavailable.", 503)
+		return
 	}
 
 	compose := renderCompose(tpl.Compose, body.Variables)
-	run, err := h.sshRun(serverID)
+	send, err := h.sshInput(r.Context(), serverID)
 	if err != nil {
 		writeErr(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+
+	run := func(command string) (string, error) { return send(command, "") }
 
 	if out, err := run(`PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin" which docker 2>/dev/null || command -v docker 2>/dev/null`); err != nil || out == "" {
 		writeErr(w,
@@ -147,40 +217,38 @@ func (h *Handler) Deploy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	deployPath := fmt.Sprintf("/opt/nexus-apps/%s", body.AppName)
-	if _, err := run(fmt.Sprintf("mkdir -p %s", deployPath)); err != nil {
-		writeErr(w, "mkdir failed: "+err.Error(), http.StatusInternalServerError)
+	if _, err := run("umask 077; mkdir -p /opt/nexus-apps && mkdir -- " + shellQuote(deployPath)); err != nil {
+		writeErr(w, "App directory could not be reserved; existing files were retained.", http.StatusConflict)
 		return
 	}
-	encoded := base64.StdEncoding.EncodeToString([]byte(compose))
-	writeCmd := fmt.Sprintf("printf '%%s' %s | base64 -d > %s/docker-compose.yml", shellQuote(encoded), deployPath)
-	if _, err := run(writeCmd); err != nil {
-		writeErr(w, "write compose failed: "+err.Error(), http.StatusInternalServerError)
+	if _, err := send("umask 077; cat > "+shellQuote(deployPath+"/docker-compose.yml"), compose); err != nil {
+		writeErr(w, "write compose failed", http.StatusBadGateway)
 		return
 	}
 
-	output, deployErr := run(fmt.Sprintf(
-		`cd %s && PATH="$PATH:/usr/local/bin:/usr/bin:/bin" docker compose up -d 2>&1 || docker-compose up -d 2>&1`,
-		deployPath,
-	))
+	output, deployErr := run(deploymentCommand(deployPath, "up -d"))
 
-	id := make([]byte, 8)
-	rand.Read(id)
-	varsJSON, _ := json.Marshal(body.Variables)
 	app := models.DeployedApp{
-		ID:          hex.EncodeToString(id),
+		ID:          appID,
 		ServerID:    serverID,
 		TemplateID:  body.TemplateID,
 		Name:        body.AppName,
 		ComposePath: deployPath,
-		VarsJSON:    string(varsJSON),
+		VarsEnc:     encryptedVars,
 		Status:      "running",
 		DeployedAt:  time.Now(),
 	}
-	if deployErr != nil {
+	if errors.Is(deployErr, nexusssh.ErrRemoteUnknown) {
+		app.Status = "unknown"
+	} else if deployErr != nil {
 		app.Status = "failed"
 	}
-	h.db.Create(&app)
+	if err := h.db.Create(&app).Error; err != nil {
+		writeErr(w, "Could not store deployment status.", 500)
+		return
+	}
 
+	audit.MarkResource(r.Context(), "application", app.ID)
 	w.Header().Set("Content-Type", "application/json")
 	if deployErr != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -202,17 +270,21 @@ func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "app not found", http.StatusNotFound)
 		return
 	}
-	run, err := h.sshRun(serverID)
+	run, err := h.sshRun(r.Context(), serverID)
 	if err != nil {
 		writeErr(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	output, _ := run(fmt.Sprintf(
-		`cd %s && PATH="$PATH:/usr/local/bin:/usr/bin:/bin" docker compose down -v 2>&1 || docker-compose down -v 2>&1`,
-		app.ComposePath,
-	))
-	run(fmt.Sprintf("rm -rf %s", app.ComposePath))
-	h.db.Delete(&app)
+	output, err := stopDeployment(run, app.ComposePath)
+	if err != nil {
+		writeErr(w, "App shutdown failed; files, volumes and the stored record were retained.", 502)
+		return
+	}
+	if err := h.db.Delete(&app).Error; err != nil {
+		writeErr(w, "App stopped, but the stored record could not be removed.", 500)
+		return
+	}
+
 	writeJSON(w, map[string]string{"output": output}, http.StatusOK)
 }
 
@@ -231,17 +303,25 @@ func (h *Handler) CreateCustom(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "name and compose are required", http.StatusBadRequest)
 		return
 	}
-	id := make([]byte, 8)
-	rand.Read(id)
-	varsJSON, _ := json.Marshal(body.Vars)
-	tpl := models.CustomTemplate{
-		ID: hex.EncodeToString(id), Name: body.Name, Icon: body.Icon,
-		Category: body.Category, Description: body.Description,
-		DocURL: body.DocURL, PostDeploy: body.PostDeploy,
-		VarsJSON: string(varsJSON), Compose: body.Compose,
-		CreatedAt: time.Now(),
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		writeErr(w, "Template identity unavailable.", 503)
+		return
 	}
-	h.db.Create(&tpl)
+	varsJSON, _ := json.Marshal(body.Vars)
+	encrypted, err := nexuscrypto.EncryptTemplateDefinition(h.encKey, hex.EncodeToString(id), nexuscrypto.TemplateDefinition{Compose: body.Compose, VarsJSON: string(varsJSON), PostDeploy: body.PostDeploy})
+	clear(varsJSON)
+	if err != nil {
+		writeErr(w, "Template encryption unavailable.", 503)
+		return
+	}
+	tpl := models.CustomTemplate{ID: hex.EncodeToString(id), Name: body.Name, Icon: body.Icon, Category: body.Category, Description: body.Description, DocURL: body.DocURL, DefinitionEnc: encrypted, CreatedAt: time.Now()}
+
+	if err := h.db.Create(&tpl).Error; err != nil {
+		writeErr(w, "Could not create template.", 503)
+		return
+	}
+	audit.MarkResource(r.Context(), "template", tpl.ID)
 	writeJSON(w, tpl, http.StatusCreated)
 }
 
@@ -262,20 +342,37 @@ func (h *Handler) UpdateCustom(w http.ResponseWriter, r *http.Request) {
 		Vars        []TemplateVar `json:"vars"`
 		Compose     string        `json:"compose"`
 	}
-	json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" || body.Compose == "" {
+		writeErr(w, "Name and compose are required.", 400)
+		return
+	}
 	varsJSON, _ := json.Marshal(body.Vars)
-	h.db.Model(&tpl).Updates(map[string]any{
+	encrypted, err := nexuscrypto.EncryptTemplateDefinition(h.encKey, tpl.ID, nexuscrypto.TemplateDefinition{Compose: body.Compose, VarsJSON: string(varsJSON), PostDeploy: body.PostDeploy})
+	clear(varsJSON)
+	if err != nil {
+		writeErr(w, "Template encryption unavailable.", 503)
+		return
+	}
+	if err := h.db.Model(&tpl).Updates(map[string]any{
 		"name": body.Name, "icon": body.Icon, "category": body.Category,
 		"description": body.Description, "doc_url": body.DocURL,
-		"post_deploy": body.PostDeploy, "vars_json": string(varsJSON),
-		"compose": body.Compose,
-	})
-	h.db.First(&tpl, "id = ?", id)
-	writeJSON(w, tpl, http.StatusOK)
+		"definition_enc": encrypted,
+	}).Error; err != nil {
+		writeErr(w, "Could not update template.", 503)
+		return
+	}
+	if err := h.db.First(&tpl, "id=?", id).Error; err != nil {
+		writeErr(w, "Could not reload template.", 503)
+		return
+	}
+	writeJSON(w, tpl, 200)
 }
 
 func (h *Handler) DeleteCustom(w http.ResponseWriter, r *http.Request) {
-	h.db.Delete(&models.CustomTemplate{}, "id = ?", chi.URLParam(r, "id"))
+	if err := h.db.Delete(&models.CustomTemplate{}, "id = ?", chi.URLParam(r, "id")).Error; err != nil {
+		writeErr(w, "Could not delete template.", 503)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -287,16 +384,17 @@ func (h *Handler) resolveTemplate(id string) (AppTemplate, error) {
 	if err := h.db.First(&c, "id = ?", id).Error; err != nil {
 		return AppTemplate{}, fmt.Errorf("not found")
 	}
-	var vars []TemplateVar
-	json.Unmarshal([]byte(c.VarsJSON), &vars)
-	return AppTemplate{
-		ID: c.ID, Name: c.Name, Icon: c.Icon,
-		Category: c.Category, Description: c.Description,
-		PostDeploy: c.PostDeploy, Vars: vars, Compose: c.Compose,
-	}, nil
+	return h.openCustom(c)
 }
 
-func (h *Handler) sshRun(serverID string) (func(string) (string, error), error) {
+func (h *Handler) sshRun(ctx context.Context, serverID string) (func(string) (string, error), error) {
+	send, err := h.sshInput(ctx, serverID)
+	if err != nil {
+		return nil, err
+	}
+	return func(command string) (string, error) { return send(command, "") }, nil
+}
+func (h *Handler) sshInput(ctx context.Context, serverID string) (func(string, string) (string, error), error) {
 	var server models.Server
 	if err := h.db.First(&server, "id = ?", serverID).Error; err != nil {
 		return nil, fmt.Errorf("server not found")
@@ -305,22 +403,16 @@ func (h *Handler) sshRun(serverID string) (func(string) (string, error), error) 
 	if err != nil {
 		return nil, fmt.Errorf("key decrypt failed")
 	}
-	client, err := h.pool.Get(nexusssh.ServerConfig{
+	client, err := h.pool.GetContext(ctx, nexusssh.ServerConfig{
 		ID: server.ID, Host: server.Host, Port: server.Port,
 		User: server.Username, PrivKey: privKey,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ssh: %w", err)
 	}
-	return func(cmd string) (string, error) {
-		sess, err := client.NewSession()
-		if err != nil {
-			h.pool.Remove(serverID)
-			return "", err
-		}
-		defer sess.Close()
-		out, err := sess.CombinedOutput(cmd)
-		return strings.TrimSpace(string(out)), err
+	return func(cmd, input string) (string, error) {
+		out, err := nexusssh.Run(ctx, client, cmd, strings.NewReader(input), nexusssh.CommandTimeout)
+		return strings.TrimSpace(out), err
 	}, nil
 }
 
@@ -356,4 +448,20 @@ func writeJSON(w http.ResponseWriter, v any, status int) {
 
 func writeErr(w http.ResponseWriter, msg string, status int) {
 	writeJSON(w, map[string]string{"error": msg}, status)
+}
+
+var appNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+
+func stopDeployment(run func(string) (string, error), directory string) (string, error) {
+	if path.Clean(directory) != directory || !strings.HasPrefix(directory, "/opt/nexus-apps/") || path.Dir(directory) != "/opt/nexus-apps" || !appNameRe.MatchString(path.Base(directory)) {
+		return "", fmt.Errorf("invalid managed app directory")
+	}
+	// Keep named volumes, bind-mounted data and the Compose recipe for recovery.
+	return run(deploymentCommand(directory, "down"))
+}
+
+func deploymentCommand(directory, action string) string {
+	// Select the installed adapter before executing a mutation. Never retry a
+	// failed v2 mutation through v1, or run a fallback outside the app directory.
+	return "cd " + shellQuote(directory) + ` && { export PATH="$PATH:/usr/local/bin:/usr/bin:/bin"; if docker compose version >/dev/null 2>&1; then docker compose ` + action + ` 2>&1; elif command -v docker-compose >/dev/null 2>&1; then docker-compose ` + action + ` 2>&1; else exit 127; fi; }`
 }
