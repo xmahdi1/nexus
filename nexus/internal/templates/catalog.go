@@ -10,16 +10,18 @@ const (
 )
 
 type TemplateVar struct {
-	Name        string   `json:"name"`
-	Label       string   `json:"label"`
-	Description string   `json:"description,omitempty"`
-	Default     string   `json:"default,omitempty"`
-	Required    bool     `json:"required"`
-	Type        VarType  `json:"type"`
-	Options     []string `json:"options,omitempty"`
+	Name          string   `json:"name"`
+	Label         string   `json:"label"`
+	Description   string   `json:"description,omitempty"`
+	Default       string   `json:"default,omitempty"`
+	StoredDefault bool     `json:"storedDefault,omitempty"`
+	Required      bool     `json:"required"`
+	Type          VarType  `json:"type"`
+	Options       []string `json:"options,omitempty"`
 }
 
 type AppTemplate struct {
+	SetupKind   string        `json:"setupKind,omitempty"`
 	ID          string        `json:"id"`
 	Name        string        `json:"name"`
 	Description string        `json:"description"`
@@ -35,6 +37,8 @@ type AppTemplate struct {
 
 func Catalog() []AppTemplate {
 	return []AppTemplate{
+		{ID: "github-runner", Name: "GitHub Actions Runner", Icon: "🏗️", Category: "Automation", BuiltIn: true, SetupKind: "github-runner", Description: "One-job self-hosted runner on a dedicated build server. Guided setup uses a short-lived registration token and an isolated temporary workspace.", DocURL: "https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/add-runners"},
+		vaultTemplate(),
 		{
 			ID: "portainer", Name: "Portainer",
 			Icon:        "/app-logos/portainer.png",

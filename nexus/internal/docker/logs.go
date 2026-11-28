@@ -1,10 +1,12 @@
 package docker
 
 import (
+	"context"
 	"io"
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -35,15 +37,14 @@ func NewLogsHandler(db *gorm.DB, encKey []byte, pool *nexusssh.Pool, secret []by
 }
 
 func (h *LogsHandler) Handle(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(nexusauth.CookieName())
-	if err != nil {
+	if _, ok := nexusauth.FromContext(r.Context()); !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if _, err := nexusauth.ValidateToken(cookie.Value, h.secret); err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	defer nexusauth.WatchAccess(r, cancel)()
 
 	serverID := chi.URLParam(r, "id")
 	containerID := chi.URLParam(r, "cid")
@@ -60,7 +61,7 @@ func (h *LogsHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sshClient, err := h.pool.Get(nexusssh.ServerConfig{
+	sshClient, err := h.pool.GetContext(ctx, nexusssh.ServerConfig{
 		ID:      server.ID,
 		Host:    server.Host,
 		Port:    server.Port,
@@ -72,7 +73,7 @@ func (h *LogsHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stream, err := NewClient(sshClient).LogsStream(containerID, 200)
+	stream, err := NewClientContext(ctx, sshClient).LogsStream(containerID, 200)
 	if err != nil {
 		http.Error(w, "logs: "+err.Error(), http.StatusBadGateway)
 		return
@@ -85,10 +86,14 @@ func (h *LogsHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(64 << 10)
+	stop := context.AfterFunc(ctx, func() { conn.Close(); stream.Close() })
+	defer stop()
 
 	var mu sync.Mutex
 	write := func(data []byte) {
 		mu.Lock()
+		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		conn.WriteMessage(websocket.TextMessage, data)
 		mu.Unlock()
 	}

@@ -1,67 +1,69 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { useI18n } from 'vue-i18n'
-import { toast } from 'vue-sonner'
-import { Copy, KeyRound, Loader2 } from '@lucide/vue'
-import { api } from '@/lib/api'
-import Dialog from './ui/Dialog.vue'
-import Button from './ui/Button.vue'
-import Input from './ui/Input.vue'
-import Label from './ui/Label.vue'
-import Textarea from './ui/Textarea.vue'
+import { ref } from 'vue';
+import { useI18n } from 'vue-i18n';
+import { toast } from 'vue-sonner';
+import { Copy, KeyRound, Loader2 } from '@lucide/vue';
+import { api } from '@/lib/api';
+import Dialog from './ui/Dialog.vue';
+import Button from './ui/Button.vue';
+import Input from './ui/Input.vue';
+import Label from './ui/Label.vue';
+import Textarea from './ui/Textarea.vue';
 
-defineProps<{ open: boolean }>()
+defineProps<{ open: boolean }>();
 const emit = defineEmits<{
-  'update:open': [boolean]
-  save: [{ name: string; host: string; port: number; username: string; publicKey: string; privateKey: string }]
-}>()
+  'update:open': [boolean];
+  save: [
+    { name: string; host: string; port: number; username: string; publicKey: string; privateKey: string },
+  ];
+}>();
 
-const { t } = useI18n()
+const { t } = useI18n();
 
-const form          = ref({ name: '', host: '', port: '22', username: 'root' })
-const pubKey        = ref('')
-const privKey       = ref('')
-const generatingKey = ref(false)
+const form = ref({ name: '', host: '', port: '22', username: 'root' });
+const pubKey = ref('');
+const privKey = ref('');
+const generatingKey = ref(false);
 
 async function generateKey() {
-  generatingKey.value = true
+  generatingKey.value = true;
   try {
-    const kp = await api.keys.generate()
-    pubKey.value  = kp.publicKey
-    privKey.value = kp.privateKey
+    const kp = await api.keys.generate();
+    pubKey.value = kp.publicKey;
+    privKey.value = kp.privateKey;
   } catch (e) {
-    toast.error(e instanceof Error ? e.message : 'Failed to generate key')
+    toast.error(e instanceof Error ? e.message : 'Failed to generate key');
   } finally {
-    generatingKey.value = false
+    generatingKey.value = false;
   }
 }
 
 function handleSave() {
   if (!form.value.name || !form.value.host) {
-    toast.error('Name and host are required')
-    return
+    toast.error('Name and host are required');
+    return;
   }
   if (!privKey.value) {
-    toast.error('Generate a key pair first')
-    return
+    toast.error('Generate a key pair first');
+    return;
   }
   emit('save', {
-    name:       form.value.name,
-    host:       form.value.host,
-    port:       parseInt(form.value.port) || 22,
-    username:   form.value.username,
-    publicKey:  pubKey.value,
+    name: form.value.name,
+    host: form.value.host,
+    port: parseInt(form.value.port) || 22,
+    username: form.value.username,
+    publicKey: pubKey.value,
     privateKey: privKey.value,
-  })
-  form.value    = { name: '', host: '', port: '22', username: 'root' }
-  pubKey.value  = ''
-  privKey.value = ''
-  emit('update:open', false)
+  });
+  form.value = { name: '', host: '', port: '22', username: 'root' };
+  pubKey.value = '';
+  privKey.value = '';
+  emit('update:open', false);
 }
 
 async function copyKey() {
-  await navigator.clipboard.writeText(pubKey.value)
-  toast.success(t('servers.copied'))
+  await navigator.clipboard.writeText(pubKey.value);
+  toast.success(t('servers.copied'));
 }
 </script>
 
@@ -92,7 +94,13 @@ async function copyKey() {
           <Input id="u" v-model="form.username" />
         </div>
 
-        <Button variant="outline" type="button" class="gap-2 w-full sm:w-auto" :disabled="generatingKey" @click="generateKey">
+        <Button
+          variant="outline"
+          type="button"
+          class="gap-2 w-full sm:w-auto"
+          :disabled="generatingKey"
+          @click="generateKey"
+        >
           <Loader2 v-if="generatingKey" class="h-4 w-4 animate-spin" />
           <KeyRound v-else class="h-4 w-4" />
           {{ generatingKey ? 'Generating…' : t('servers.generateKey') }}

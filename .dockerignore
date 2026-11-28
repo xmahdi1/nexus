@@ -1,0 +1,28 @@
+.git
+.aws
+.codex
+.claude
+.agents
+.idea
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/node_modules
+**/dist
+nexus/nexus
+docs
+NEXUS_2_0_SPECIFICATION.md
+
+**/__pycache__
+**/*.pyc
+
+# Files created by the local deployment script
+deployment/
+
+# Private networking plan
+**/NEXUS_PRIVATE_NETWORKING_SPECIFICATION.md

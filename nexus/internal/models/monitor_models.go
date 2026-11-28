@@ -3,7 +3,8 @@ package models
 type AlertConfig struct {
 	ID               string `gorm:"primaryKey"   json:"id"`
 	TelegramEnabled  bool   `json:"telegramEnabled"`
-	TelegramToken    string `json:"telegramToken"`
+	TelegramToken    string `gorm:"-" json:"telegramToken"`
+	TelegramTokenEnc string `json:"-"`
 	TelegramChatID   string `json:"telegramChatId"`
 	NotifyServerDown bool   `gorm:"default:true" json:"notifyServerDown"`
 	NotifyServerUp   bool   `gorm:"default:true" json:"notifyServerUp"`

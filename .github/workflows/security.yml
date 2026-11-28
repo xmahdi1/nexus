@@ -1,0 +1,65 @@
+name: Security
+on:
+  schedule:
+    - cron: '43 4 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  image:
+    name: Container vulnerabilities and SBOM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build tracked source without deployment files
+        run: |
+          python3 scripts/ci/export_source.py "$RUNNER_TEMP/nexus-source"
+          docker build -t nexus:security "$RUNNER_TEMP/nexus-source"
+      - name: Record all container vulnerability severities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.2
+          image-ref: nexus:security
+          format: json
+          output: image-vulnerabilities.json
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: '0'
+          ignore-unfixed: 'false'
+          scan-type: image
+          scanners: vuln
+      - uses: anchore/sbom-action@dfcb83b97731532d72be422cbc51ee64adb6fd56 # v0.24.4
+        with:
+          syft-version: v1.57.2
+          image: nexus:security
+          format: spdx-json
+          artifact-name: image-sbom.spdx.json
+          output-file: image-sbom.spdx.json
+          upload-artifact: 'false'
+          dependency-snapshot: 'false'
+          upload-release-assets: 'false'
+      - name: Reject high and critical container vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.2
+          image-ref: nexus:security
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: 'false'
+          scan-type: image
+          scanners: vuln
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() && hashFiles('image-vulnerabilities.json') != '' }}
+        with:
+          name: container-security-reports
+          path: |
+            image-sbom.spdx.json
+            image-vulnerabilities.json
+          retention-days: 7
+          if-no-files-found: error

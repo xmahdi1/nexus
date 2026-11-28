@@ -1,0 +1,8 @@
+{
+  "fixture_only": true,
+  "host": {"id": "lab-fixture", "address": "192.0.2.10", "collected_at": "2026-11-12T12:00:00Z"},
+  "interfaces": [{"name": "eth0", "addresses": ["192.0.2.10/24"]}],
+  "listeners": [{"protocol": "tcp", "address": "127.0.0.1", "port": 5432, "source": "ss", "reachability": "unverified"}],
+  "containers": [{"id": "fixture-db", "internal_ports": [5432], "published_ports": []}],
+  "warnings": ["Synthetic baseline fixture; no discovery collector is implemented."]
+}
