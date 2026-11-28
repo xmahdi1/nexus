@@ -7,7 +7,7 @@ require (
 	github.com/gorilla/websocket v1.5.4-0.20240701034025-d67f41855da4
 	github.com/joho/godotenv v1.5.1
 	github.com/mattn/go-sqlite3 v1.14.53
-	github.com/pkg/sftp v1.13.10
+	github.com/pkg/sftp v1.13.13
 	github.com/pquerna/otp v1.5.0
 	golang.org/x/crypto v0.59.0
 	golang.org/x/term v0.48.0
