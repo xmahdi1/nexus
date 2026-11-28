@@ -32,6 +32,12 @@ func isBlocked(name string) bool {
 		if seg == "" {
 			continue
 		}
+		lower := strings.ToLower(seg)
+		for _, suffix := range []string{".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3", ".pem", ".key"} {
+			if strings.HasSuffix(lower, suffix) {
+				return true
+			}
+		}
 		if strings.HasPrefix(seg, ".") || blockedNames[seg] {
 			return true
 		}
@@ -55,7 +61,11 @@ func spaHandler(fsys fs.FS) http.Handler {
 			return
 		}
 		r2 := r.Clone(r.Context())
-		r2.URL.Path = "/index.html"
+		// FileServer redirects /index.html to ./; serving the filesystem root
+		// internally preserves the browser history route without a redirect.
+		r2.URL.Path = "/"
+		r2.URL.RawPath = ""
+		w.Header().Set("Cache-Control", "no-store")
 		fileServer.ServeHTTP(w, r2)
 	})
 }

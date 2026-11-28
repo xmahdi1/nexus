@@ -1,6 +1,6 @@
 <script setup lang="ts">
-defineProps<{ open: boolean }>()
-defineEmits<{ 'update:open': [boolean] }>()
+defineProps<{ open: boolean }>();
+defineEmits<{ 'update:open': [boolean] }>();
 </script>
 
 <template>

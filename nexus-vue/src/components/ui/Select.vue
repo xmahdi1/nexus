@@ -1,25 +1,27 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { ChevronDown } from '@lucide/vue'
-import { cn } from '@/lib/utils'
-import { onClickOutside } from '@vueuse/core'
+import { ref, computed } from 'vue';
+import { ChevronDown } from '@lucide/vue';
+import { cn } from '@/lib/utils';
+import { onClickOutside } from '@vueuse/core';
 
 const props = defineProps<{
-  modelValue: string
-  options: Array<{ value: string; label: string }>
-  class?: string
-}>()
-const emit = defineEmits<{ 'update:modelValue': [string] }>()
+  modelValue: string;
+  options: Array<{ value: string; label: string }>;
+  class?: string;
+}>();
+const emit = defineEmits<{ 'update:modelValue': [string] }>();
 
-const open = ref(false)
-const container = ref<HTMLElement | null>(null)
-const selected = computed(() => props.options.find((o) => o.value === props.modelValue)?.label ?? '')
+const open = ref(false);
+const container = ref<HTMLElement | null>(null);
+const selected = computed(() => props.options.find((o) => o.value === props.modelValue)?.label ?? '');
 
-onClickOutside(container, () => { open.value = false })
+onClickOutside(container, () => {
+  open.value = false;
+});
 
 function select(v: string) {
-  emit('update:modelValue', v)
-  open.value = false
+  emit('update:modelValue', v);
+  open.value = false;
 }
 </script>
 

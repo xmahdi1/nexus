@@ -12,16 +12,21 @@ import (
 )
 
 type DockerHandler struct {
-	db     *gorm.DB
-	encKey []byte
-	pool   *nexusssh.Pool
+	supervised bool
+	db         *gorm.DB
+	encKey     []byte
+	pool       *nexusssh.Pool
 }
 
-func NewDockerHandler(db *gorm.DB, encKey []byte, pool *nexusssh.Pool) *DockerHandler {
-	return &DockerHandler{db: db, encKey: encKey, pool: pool}
+func NewDockerHandler(db *gorm.DB, encKey []byte, pool *nexusssh.Pool, supervised ...bool) *DockerHandler {
+	h := &DockerHandler{db: db, encKey: encKey, pool: pool}
+	if len(supervised) > 0 {
+		h.supervised = supervised[0]
+	}
+	return h
 }
 
-func (h *DockerHandler) dockerClient(w http.ResponseWriter, serverID string) (*docker.Client, bool) {
+func (h *DockerHandler) dockerClient(w http.ResponseWriter, r *http.Request, serverID string) (*docker.Client, bool) {
 	var server models.Server
 	if err := h.db.First(&server, "id = ?", serverID).Error; err != nil {
 		writeErr(w, "server not found", "not_found", http.StatusNotFound)
@@ -32,7 +37,7 @@ func (h *DockerHandler) dockerClient(w http.ResponseWriter, serverID string) (*d
 		writeErr(w, "key decrypt failed", "internal", http.StatusInternalServerError)
 		return nil, false
 	}
-	sshClient, err := h.pool.Get(nexusssh.ServerConfig{
+	sshClient, err := h.pool.GetContext(r.Context(), nexusssh.ServerConfig{
 		ID:      server.ID,
 		Host:    server.Host,
 		Port:    server.Port,
@@ -43,11 +48,11 @@ func (h *DockerHandler) dockerClient(w http.ResponseWriter, serverID string) (*d
 		writeErr(w, "ssh: "+err.Error(), "connection_failed", http.StatusBadGateway)
 		return nil, false
 	}
-	return docker.NewClient(sshClient), true
+	return docker.NewClientContext(r.Context(), sshClient), true
 }
 
 func (h *DockerHandler) ListContainers(w http.ResponseWriter, r *http.Request) {
-	client, ok := h.dockerClient(w, chi.URLParam(r, "id"))
+	client, ok := h.dockerClient(w, r, chi.URLParam(r, "id"))
 	if !ok {
 		return
 	}
@@ -80,7 +85,11 @@ func (h *DockerHandler) containerAction(
 	r *http.Request,
 	fn func(*docker.Client, string) error,
 ) {
-	client, ok := h.dockerClient(w, chi.URLParam(r, "id"))
+	if h.supervised {
+		writeErr(w, "Use supervised operation controls with a request ID.", "supervised_operation_required", 409)
+		return
+	}
+	client, ok := h.dockerClient(w, r, chi.URLParam(r, "id"))
 	if !ok {
 		return
 	}

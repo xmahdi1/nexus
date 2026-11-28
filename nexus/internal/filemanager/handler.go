@@ -1,8 +1,12 @@
 package filemanager
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/xmahdi1/nexus/internal/audit"
+	"github.com/xmahdi1/nexus/internal/auth"
 	"io"
 	"net/http"
 	"path"
@@ -37,7 +41,7 @@ func NewHandler(db *gorm.DB, encKey []byte, pool *nexusssh.Pool) *Handler {
 	return &Handler{db: db, encKey: encKey, pool: pool}
 }
 
-func (h *Handler) getSFTP(serverID string) (*sftp.Client, error) {
+func (h *Handler) getSFTP(r *http.Request, serverID string) (*fileSession, error) {
 	var server models.Server
 	if err := h.db.First(&server, "id = ?", serverID).Error; err != nil {
 		return nil, fmt.Errorf("server not found")
@@ -46,14 +50,24 @@ func (h *Handler) getSFTP(serverID string) (*sftp.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("key decrypt failed")
 	}
-	sshClient, err := h.pool.Get(nexusssh.ServerConfig{
+	sshClient, err := h.pool.GetContext(r.Context(), nexusssh.ServerConfig{
 		ID: server.ID, Host: server.Host, Port: server.Port,
 		User: server.Username, PrivKey: privKey,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ssh: %w", err)
 	}
-	return sftp.NewClient(sshClient)
+	ctx, cancel := context.WithTimeout(r.Context(), transferTimeout)
+	stopWatch := auth.WatchAccess(r, cancel)
+	client, err := openSFTP(ctx, sshClient)
+	if err != nil {
+		stopWatch()
+		cancel()
+		return nil, err
+	}
+	closeSession := client.closeSession
+	client.closeSession = func() { stopWatch(); cancel(); closeSession() }
+	return client, nil
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
@@ -61,7 +75,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	if dirPath == "" {
 		dirPath = "/"
 	}
-	client, err := h.getSFTP(chi.URLParam(r, "id"))
+	client, err := h.getSFTP(r, chi.URLParam(r, "id"))
 	if err != nil {
 		writeErr(w, err.Error(), "sftp_error", http.StatusBadGateway)
 		return
@@ -71,6 +85,10 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	entries, err := client.ReadDir(dirPath)
 	if err != nil {
 		writeErr(w, "failed to list directory: "+err.Error(), "list_error", http.StatusInternalServerError)
+		return
+	}
+	if len(entries) > 10000 {
+		writeErr(w, "Directory contains more than 10000 entries.", "directory_limit", http.StatusRequestEntityTooLarge)
 		return
 	}
 	result := make([]FileEntry, 0, len(entries))
@@ -99,7 +117,7 @@ func (h *Handler) Preview(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "path is required", "bad_request", http.StatusBadRequest)
 		return
 	}
-	client, err := h.getSFTP(chi.URLParam(r, "id"))
+	client, err := h.getSFTP(r, chi.URLParam(r, "id"))
 	if err != nil {
 		writeErr(w, err.Error(), "sftp_error", http.StatusBadGateway)
 		return
@@ -115,7 +133,11 @@ func (h *Handler) Preview(w http.ResponseWriter, r *http.Request) {
 
 	const maxBytes = 256 * 1024
 	buf := make([]byte, maxBytes+1)
-	n, _ := io.ReadFull(f, buf)
+	n, readErr := io.ReadFull(f, buf)
+	if readErr != nil && !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		writeErr(w, "Could not read preview.", "read_error", http.StatusBadGateway)
+		return
+	}
 	truncated := n > maxBytes
 	if truncated {
 		n = maxBytes
@@ -137,7 +159,7 @@ func (h *Handler) Write(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "path is required", "bad_request", http.StatusBadRequest)
 		return
 	}
-	client, err := h.getSFTP(chi.URLParam(r, "id"))
+	client, err := h.getSFTP(r, chi.URLParam(r, "id"))
 	if err != nil {
 		writeErr(w, err.Error(), "sftp_error", http.StatusBadGateway)
 		return
@@ -155,6 +177,10 @@ func (h *Handler) Write(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "failed to write file: "+err.Error(), "write_error", http.StatusInternalServerError)
 		return
 	}
+	if err := f.Close(); err != nil {
+		writeErr(w, "Could not finish file write.", "write_error", http.StatusBadGateway)
+		return
+	}
 	writeJSON(w, map[string]bool{"ok": true}, http.StatusOK)
 }
 
@@ -164,7 +190,7 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "path is required", "bad_request", http.StatusBadRequest)
 		return
 	}
-	client, err := h.getSFTP(chi.URLParam(r, "id"))
+	client, err := h.getSFTP(r, chi.URLParam(r, "id"))
 	if err != nil {
 		writeErr(w, err.Error(), "sftp_error", http.StatusBadGateway)
 		return
@@ -178,20 +204,47 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
-	if stat, err := f.Stat(); err == nil {
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", stat.Size()))
+	stat, err := f.Stat()
+	if err != nil {
+		writeErr(w, "Could not read file metadata.", "stat_error", http.StatusBadGateway)
+		return
 	}
+	if !stat.Mode().IsRegular() || stat.Size() < 0 || stat.Size() > maxTransferBytes {
+		writeErr(w, "Downloads are limited to regular files of at most 64 MiB.", "download_limit", http.StatusRequestEntityTooLarge)
+		return
+	}
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", stat.Size()))
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, path.Base(filePath)))
 	w.Header().Set("Content-Type", "application/octet-stream")
-	io.Copy(w, f)
+	if _, err := io.CopyN(w, f, stat.Size()); err != nil {
+		audit.MarkFailed(r.Context())
+	}
 }
 
 func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
+	// ParseMultipartForm's memory limit spills larger parts to disk; it does
+	// not limit the request. Bound the stream before any form parsing or SSH.
+	const maxUploadBytes = maxTransferBytes + (1 << 20)
+	if r.ContentLength > maxUploadBytes {
+		writeErr(w, "Uploads are limited to 64 MiB plus multipart overhead.", "upload_limit", http.StatusRequestEntityTooLarge)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
 	dirPath := r.URL.Query().Get("path")
 	if dirPath == "" {
 		dirPath = "/"
 	}
-	if err := r.ParseMultipartForm(64 << 20); err != nil {
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		var limit *http.MaxBytesError
+		if errors.As(err, &limit) {
+			writeErr(w, "Uploads are limited to 64 MiB plus multipart overhead.", "upload_limit", http.StatusRequestEntityTooLarge)
+			return
+		}
 		writeErr(w, "failed to parse upload", "bad_request", http.StatusBadRequest)
 		return
 	}
@@ -201,8 +254,12 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
+	if header.Size < 0 || header.Size > maxTransferBytes {
+		writeErr(w, "Uploads are limited to 64 MiB.", "upload_limit", http.StatusRequestEntityTooLarge)
+		return
+	}
 
-	client, err := h.getSFTP(chi.URLParam(r, "id"))
+	client, err := h.getSFTP(r, chi.URLParam(r, "id"))
 	if err != nil {
 		writeErr(w, err.Error(), "sftp_error", http.StatusBadGateway)
 		return
@@ -221,10 +278,23 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "upload failed: "+err.Error(), "upload_error", http.StatusInternalServerError)
 		return
 	}
+	if err := dest.Close(); err != nil {
+		writeErr(w, "Could not finish upload.", "upload_error", http.StatusBadGateway)
+		return
+	}
 	writeJSON(w, map[string]any{"ok": true, "path": destPath}, http.StatusOK)
 }
 
 func removeAll(client *sftp.Client, p string) error {
+	remaining := 10000
+	return removeTree(client, p, &remaining)
+}
+func removeTree(client *sftp.Client, p string, remaining *int) error {
+	if *remaining <= 0 {
+		return fmt.Errorf("recursive deletion exceeds 10000 entries; inspect partial result")
+	}
+	*remaining -= 1
+
 	info, err := client.Lstat(p)
 	if err != nil {
 		return err
@@ -237,7 +307,7 @@ func removeAll(client *sftp.Client, p string) error {
 		return err
 	}
 	for _, e := range entries {
-		if err := removeAll(client, path.Join(p, e.Name())); err != nil {
+		if err := removeTree(client, path.Join(p, e.Name()), remaining); err != nil {
 			return err
 		}
 	}
@@ -250,14 +320,18 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "path is required", "bad_request", http.StatusBadRequest)
 		return
 	}
-	client, err := h.getSFTP(chi.URLParam(r, "id"))
+	client, err := h.getSFTP(r, chi.URLParam(r, "id"))
 	if err != nil {
 		writeErr(w, err.Error(), "sftp_error", http.StatusBadGateway)
 		return
 	}
 	defer client.Close()
 
-	if err := removeAll(client, filePath); err != nil {
+	if path.Clean(filePath) == "/" || path.Clean(filePath) == "." {
+		writeErr(w, "Refusing to delete a filesystem root.", "unsafe_path", http.StatusBadRequest)
+		return
+	}
+	if err := removeAll(client.Client, filePath); err != nil {
 		writeErr(w, "failed to delete: "+err.Error(), "delete_error", http.StatusInternalServerError)
 		return
 	}
@@ -272,7 +346,7 @@ func (h *Handler) Mkdir(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "path is required", "bad_request", http.StatusBadRequest)
 		return
 	}
-	client, err := h.getSFTP(chi.URLParam(r, "id"))
+	client, err := h.getSFTP(r, chi.URLParam(r, "id"))
 	if err != nil {
 		writeErr(w, err.Error(), "sftp_error", http.StatusBadGateway)
 		return

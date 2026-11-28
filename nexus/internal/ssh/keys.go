@@ -10,8 +10,8 @@ import (
 
 type KeyPair struct {
 	PublicKey   string
-	PrivateKey  string 
-	Fingerprint string 
+	PrivateKey  string
+	Fingerprint string
 }
 
 func GenerateKeyPair() (*KeyPair, error) {

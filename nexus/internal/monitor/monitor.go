@@ -1,6 +1,8 @@
 package monitor
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -8,9 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xmahdi1/nexus/internal/authorization"
 	nexuscrypto "github.com/xmahdi1/nexus/internal/crypto"
 	"github.com/xmahdi1/nexus/internal/models"
 	nexusssh "github.com/xmahdi1/nexus/internal/ssh"
+	"golang.org/x/crypto/ssh"
 	"gorm.io/gorm"
 )
 
@@ -24,6 +28,8 @@ type ServerStatus struct {
 	CheckedAt  time.Time `json:"checkedAt"`
 	LastOnline time.Time `json:"lastOnline"`
 }
+
+const maxConcurrentChecks = 8
 
 type Monitor struct {
 	db     *gorm.DB
@@ -40,39 +46,51 @@ type Monitor struct {
 }
 
 func New(db *gorm.DB, encKey []byte, pool *nexusssh.Pool) *Monitor {
-	db.AutoMigrate(&models.AlertConfig{}, &models.MonitoredContainer{}, &models.ServerAlertConfig{})
-	var cfg models.AlertConfig
-	if db.First(&cfg, "id = ?", "default").Error != nil {
-		db.Create(&models.AlertConfig{
-			ID: "default", NotifyServerDown: true, NotifyServerUp: true, NotifyContainer: true,
-		})
-	}
 	m := &Monitor{db: db, encKey: encKey, pool: pool}
 	m.reloadBot()
 	return m
 }
 
-func (m *Monitor) Start() {
-	go func() {
-		m.checkAllServers()
-		for range time.NewTicker(30 * time.Second).C {
-			m.checkAllServers()
+func (m *Monitor) Start(ctx context.Context) {
+	go schedule(ctx, 0, 30*time.Second, m.checkAllServers)
+	go schedule(ctx, 15*time.Second, time.Minute, m.checkAllContainers)
+	go schedule(ctx, 45*time.Second, time.Minute, m.checkAllResources)
+}
+
+func schedule(ctx context.Context, delay, interval time.Duration, check func(context.Context)) {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			if ctx.Err() != nil {
+				return
+			}
+			check(ctx)
+			timer.Reset(interval)
 		}
-	}()
-	go func() {
-		time.Sleep(15 * time.Second)
-		m.checkAllContainers()
-		for range time.NewTicker(60 * time.Second).C {
-			m.checkAllContainers()
+	}
+}
+
+func checkBatch[T any](ctx context.Context, items []T, check func(T)) {
+	slots := make(chan struct{}, maxConcurrentChecks)
+	var workers sync.WaitGroup
+	defer workers.Wait()
+	for _, item := range items {
+		select {
+		case <-ctx.Done():
+			return
+		case slots <- struct{}{}:
+			workers.Go(func() {
+				defer func() { <-slots }()
+				if ctx.Err() == nil {
+					check(item)
+				}
+			})
 		}
-	}()
-	go func() {
-		time.Sleep(45 * time.Second)
-		m.checkAllResources()
-		for range time.NewTicker(1 * time.Minute).C {
-			m.checkAllResources()
-		}
-	}()
+	}
 }
 
 func (m *Monitor) GetStatuses() []ServerStatus {
@@ -94,8 +112,14 @@ func (m *Monitor) reloadBot() {
 	}
 	m.botMu.Lock()
 	defer m.botMu.Unlock()
-	if cfg.TelegramEnabled && cfg.TelegramToken != "" && cfg.TelegramChatID != "" {
-		m.bot = NewBot(cfg.TelegramToken, cfg.TelegramChatID)
+	if cfg.TelegramEnabled && cfg.TelegramTokenEnc != "" && cfg.TelegramChatID != "" {
+		token, err := nexuscrypto.DecryptNotificationToken(m.encKey, cfg.ID, cfg.TelegramTokenEnc)
+		defer clear(token)
+		if err != nil {
+			m.bot = nil
+			return
+		}
+		m.bot = NewBot(string(token), cfg.TelegramChatID)
 	} else {
 		m.bot = nil
 	}
@@ -118,6 +142,16 @@ func (m *Monitor) shouldNotify(t AlertType) bool {
 }
 
 func (m *Monitor) notify(a Alert) {
+	permission := "metrics.read"
+	switch a.Type {
+	case AlertServerDown, AlertServerUp:
+		permission = "servers.connect"
+	case AlertContainerDown, AlertContainerUp:
+		permission = "docker.read"
+	}
+	if !authorization.New(m.db).All(authorization.MonitorPrincipal, a.ServerID, permission, "notifications.send") {
+		return
+	}
 	if !m.shouldNotify(a.Type) {
 		return
 	}
@@ -127,22 +161,25 @@ func (m *Monitor) notify(a Alert) {
 	if bot == nil {
 		return
 	}
-	go func() { _ = bot.Notify(a) }()
+	_ = bot.Notify(a)
 }
 
-func (m *Monitor) checkAllServers() {
+func (m *Monitor) checkAllServers(ctx context.Context) {
 	var servers []models.Server
-	m.db.Find(&servers)
-	var wg sync.WaitGroup
-	for _, s := range servers {
-		wg.Add(1)
-		go func(sv models.Server) { defer wg.Done(); m.checkServer(sv) }(s)
+	if err := m.db.WithContext(ctx).Find(&servers).Error; err != nil {
+		return
 	}
-	wg.Wait()
+	checkBatch(ctx, servers, func(server models.Server) { m.checkServer(ctx, server) })
 }
 
-func (m *Monitor) checkServer(server models.Server) {
-	latency, online := tcpPing(server.Host, server.Port, 5*time.Second)
+func (m *Monitor) checkServer(ctx context.Context, server models.Server) {
+	if !authorization.New(m.db).All(authorization.MonitorPrincipal, server.ID, "servers.connect") {
+		return
+	}
+	latency, online := tcpPing(ctx, server.Host, server.Port, 5*time.Second)
+	if ctx.Err() != nil {
+		return
+	}
 	now := time.Now()
 	status := &ServerStatus{
 		ServerID: server.ID, Name: server.Name, Host: server.Host, Tags: server.Tags,
@@ -161,7 +198,7 @@ func (m *Monitor) checkServer(server models.Server) {
 	if prev, hadPrev := m.prevOnline.Load(server.ID); hadPrev {
 		wasOnline := prev.(bool)
 		if wasOnline && !online {
-			m.notify(Alert{Type: AlertServerDown, ServerName: server.Name, ServerHost: server.Host, OccurredAt: now})
+			m.notify(Alert{ServerID: server.ID, Type: AlertServerDown, ServerName: server.Name, ServerHost: server.Host, OccurredAt: now})
 		} else if !wasOnline && online {
 			downtime := ""
 			if !prevLastOnline.IsZero() {
@@ -169,7 +206,7 @@ func (m *Monitor) checkServer(server models.Server) {
 					downtime = fmtDuration(d)
 				}
 			}
-			m.notify(Alert{Type: AlertServerUp, ServerName: server.Name, ServerHost: server.Host, Detail: downtime, OccurredAt: now})
+			m.notify(Alert{ServerID: server.ID, Type: AlertServerUp, ServerName: server.Name, ServerHost: server.Host, Detail: downtime, OccurredAt: now})
 		}
 	}
 	m.prevOnline.Store(server.ID, online)
@@ -182,9 +219,9 @@ func (m *Monitor) RemoveServer(serverID string) {
 	m.lastAlerted.Delete(serverID + ":ram")
 	m.lastAlerted.Delete(serverID + ":disk")
 }
-func tcpPing(host string, port int, timeout time.Duration) (time.Duration, bool) {
+func tcpPing(ctx context.Context, host string, port int, timeout time.Duration) (time.Duration, bool) {
 	start := time.Now()
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), timeout)
+	conn, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		return 0, false
 	}
@@ -192,18 +229,22 @@ func tcpPing(host string, port int, timeout time.Duration) (time.Duration, bool)
 	return time.Since(start), true
 }
 
-func (m *Monitor) checkAllResources() {
+func (m *Monitor) checkAllResources(ctx context.Context) {
 	var servers []models.Server
-	m.db.Find(&servers)
-	for _, s := range servers {
-		if st, ok := m.statuses.Load(s.ID); ok && !st.(*ServerStatus).Online {
-			continue
-		}
-		go m.checkResources(s)
+	if err := m.db.WithContext(ctx).Find(&servers).Error; err != nil {
+		return
 	}
+	checkBatch(ctx, servers, func(server models.Server) {
+		if st, ok := m.statuses.Load(server.ID); !ok || st.(*ServerStatus).Online {
+			m.checkResources(ctx, server)
+		}
+	})
 }
 
-func (m *Monitor) checkResources(server models.Server) {
+func (m *Monitor) checkResources(ctx context.Context, server models.Server) {
+	if !authorization.New(m.db).All(authorization.MonitorPrincipal, server.ID, "metrics.read", "secrets.use") {
+		return
+	}
 	var cfg models.ServerAlertConfig
 	if err := m.db.First(&cfg, "id = ?", server.ID).Error; err != nil {
 		return
@@ -216,21 +257,16 @@ func (m *Monitor) checkResources(server models.Server) {
 	if err != nil {
 		return
 	}
-	client, err := m.pool.Get(nexusssh.ServerConfig{
+	defer clear(privKey)
+	client, err := m.pool.GetContext(ctx, nexusssh.ServerConfig{
 		ID: server.ID, Host: server.Host, Port: server.Port,
 		User: server.Username, PrivKey: privKey,
 	})
 	if err != nil {
 		return
 	}
-	sess, err := client.NewSession()
-	if err != nil {
-		m.pool.Remove(server.ID)
-		return
-	}
-	defer sess.Close()
 
-	out, err := sess.Output(`
+	out, err := m.command(ctx, client, server.ID, "metrics.read", `
 read -r _ u1 n1 s1 i1 io1 irq1 sirq1 _ < /proc/stat
 sleep 1
 read -r _ u2 n2 s2 i2 io2 irq2 sirq2 _ < /proc/stat
@@ -265,7 +301,7 @@ printf "%s %s %s\n" "${CPU:-0}" "${RAM:-0}" "${DISK:-0}"
 	if cfg.CPUEnabled && cpu >= cfg.CPUThreshold {
 		key := server.ID + ":cpu"
 		if last, ok := m.lastAlerted.Load(key); !ok || now.Sub(last.(time.Time)) > cooldown {
-			m.notify(Alert{Type: AlertHighResource, ServerName: server.Name, ServerHost: server.Host,
+			m.notify(Alert{ServerID: server.ID, Type: AlertHighResource, ServerName: server.Name, ServerHost: server.Host,
 				Detail: fmt.Sprintf("CPU %.1f%% (threshold %.0f%%)", cpu, cfg.CPUThreshold), OccurredAt: now})
 			m.lastAlerted.Store(key, now)
 		}
@@ -273,7 +309,7 @@ printf "%s %s %s\n" "${CPU:-0}" "${RAM:-0}" "${DISK:-0}"
 	if cfg.RAMEnabled && ram >= cfg.RAMThreshold {
 		key := server.ID + ":ram"
 		if last, ok := m.lastAlerted.Load(key); !ok || now.Sub(last.(time.Time)) > cooldown {
-			m.notify(Alert{Type: AlertHighResource, ServerName: server.Name, ServerHost: server.Host,
+			m.notify(Alert{ServerID: server.ID, Type: AlertHighResource, ServerName: server.Name, ServerHost: server.Host,
 				Detail: fmt.Sprintf("RAM %.0f%% (threshold %.0f%%)", ram, cfg.RAMThreshold), OccurredAt: now})
 			m.lastAlerted.Store(key, now)
 		}
@@ -281,32 +317,38 @@ printf "%s %s %s\n" "${CPU:-0}" "${RAM:-0}" "${DISK:-0}"
 	if cfg.DiskEnabled && disk >= cfg.DiskThreshold {
 		key := server.ID + ":disk"
 		if last, ok := m.lastAlerted.Load(key); !ok || now.Sub(last.(time.Time)) > cooldown {
-			m.notify(Alert{Type: AlertHighResource, ServerName: server.Name, ServerHost: server.Host,
+			m.notify(Alert{ServerID: server.ID, Type: AlertHighResource, ServerName: server.Name, ServerHost: server.Host,
 				Detail: fmt.Sprintf("Disk %.0f%% (threshold %.0f%%)", disk, cfg.DiskThreshold), OccurredAt: now})
 			m.lastAlerted.Store(key, now)
 		}
 	}
 }
 
-func (m *Monitor) checkAllContainers() {
+func (m *Monitor) checkAllContainers(ctx context.Context) {
 	var monitored []models.MonitoredContainer
-	m.db.Find(&monitored)
-	if len(monitored) == 0 {
+	if err := m.db.WithContext(ctx).Find(&monitored).Error; err != nil {
 		return
 	}
-	byServer := map[string][]models.MonitoredContainer{}
-	for _, mc := range monitored {
-		byServer[mc.ServerID] = append(byServer[mc.ServerID], mc)
-	}
-	for serverID, containers := range byServer {
-		if st, ok := m.statuses.Load(serverID); ok && !st.(*ServerStatus).Online {
-			continue
+	byServer := make(map[string][]models.MonitoredContainer)
+	var servers []string
+	for _, container := range monitored {
+		if _, ok := byServer[container.ServerID]; !ok {
+			servers = append(servers, container.ServerID)
 		}
-		go m.checkContainers(serverID, containers)
+		byServer[container.ServerID] = append(byServer[container.ServerID], container)
 	}
+	checkBatch(ctx, servers, func(serverID string) {
+		if st, ok := m.statuses.Load(serverID); !ok || st.(*ServerStatus).Online {
+			m.checkContainers(ctx, serverID, byServer[serverID])
+		}
+	})
 }
 
 func (m *Monitor) SeedContainer(serverID, containerID, name string) {
+	ctx := context.Background()
+	if !authorization.New(m.db).All(authorization.MonitorPrincipal, serverID, "docker.read", "secrets.use") {
+		return
+	}
 	var server models.Server
 	if err := m.db.First(&server, "id = ?", serverID).Error; err != nil {
 		return
@@ -315,23 +357,22 @@ func (m *Monitor) SeedContainer(serverID, containerID, name string) {
 	if err != nil {
 		return
 	}
-	client, err := m.pool.Get(nexusssh.ServerConfig{
+	defer clear(privKey)
+	client, err := m.pool.GetContext(ctx, nexusssh.ServerConfig{
 		ID: server.ID, Host: server.Host, Port: server.Port,
 		User: server.Username, PrivKey: privKey,
 	})
 	if err != nil {
 		return
 	}
-	sess, err := client.NewSession()
+
+	out, err := m.command(ctx, client, server.ID, "docker.read", fmt.Sprintf(
+		"docker inspect --format='{{.State.Status}}' -- %s 2>/dev/null", "'"+strings.ReplaceAll(containerID, "'", "'\"'\"'")+"'",
+	))
 	if err != nil {
-		m.pool.Remove(serverID)
 		return
 	}
-	defer sess.Close()
 
-	out, _ := sess.Output(fmt.Sprintf(
-		"docker inspect --format='{{.State.Status}}' %s 2>/dev/null", containerID,
-	))
 	state := strings.TrimSpace(string(out))
 	if state == "" || name == "" {
 		return
@@ -347,7 +388,10 @@ func (m *Monitor) SeedContainer(serverID, containerID, name string) {
 	m.prevContStates.Store(serverID, merged)
 }
 
-func (m *Monitor) checkContainers(serverID string, monitored []models.MonitoredContainer) {
+func (m *Monitor) checkContainers(ctx context.Context, serverID string, monitored []models.MonitoredContainer) {
+	if !authorization.New(m.db).All(authorization.MonitorPrincipal, serverID, "docker.read", "secrets.use") {
+		return
+	}
 	var server models.Server
 	if err := m.db.First(&server, "id = ?", serverID).Error; err != nil {
 		return
@@ -356,21 +400,20 @@ func (m *Monitor) checkContainers(serverID string, monitored []models.MonitoredC
 	if err != nil {
 		return
 	}
-	client, err := m.pool.Get(nexusssh.ServerConfig{
+	defer clear(privKey)
+	client, err := m.pool.GetContext(ctx, nexusssh.ServerConfig{
 		ID: server.ID, Host: server.Host, Port: server.Port,
 		User: server.Username, PrivKey: privKey,
 	})
 	if err != nil {
 		return
 	}
-	sess, err := client.NewSession()
+
+	out, err := m.command(ctx, client, server.ID, "docker.read", `docker ps -a --format '{{.Names}}|{{.State}}' 2>/dev/null`)
+
 	if err != nil {
-		m.pool.Remove(serverID)
 		return
 	}
-	defer sess.Close()
-
-	out, _ := sess.Output(`docker ps -a --format '{{.Names}}|{{.State}}' 2>/dev/null`)
 
 	currentStates := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -396,9 +439,9 @@ func (m *Monitor) checkContainers(serverID string, monitored []models.MonitoredC
 		}
 		if prev != "" {
 			if prev == "running" && cur != "running" && cur != "" {
-				m.notify(Alert{Type: AlertContainerDown, ServerName: server.Name, ServerHost: server.Host, Detail: mc.Name, OccurredAt: now})
+				m.notify(Alert{ServerID: server.ID, Type: AlertContainerDown, ServerName: server.Name, ServerHost: server.Host, Detail: mc.Name, OccurredAt: now})
 			} else if prev != "running" && cur == "running" {
-				m.notify(Alert{Type: AlertContainerUp, ServerName: server.Name, ServerHost: server.Host, Detail: mc.Name, OccurredAt: now})
+				m.notify(Alert{ServerID: server.ID, Type: AlertContainerUp, ServerName: server.Name, ServerHost: server.Host, Detail: mc.Name, OccurredAt: now})
 			}
 		}
 	}
@@ -420,4 +463,22 @@ func fmtDuration(d time.Duration) string {
 		return fmt.Sprintf("%dh %dm", h, min)
 	}
 	return fmt.Sprintf("%dm", min)
+}
+
+func (m *Monitor) command(parent context.Context, client *ssh.Client, serverID, permission, command string) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	policy := authorization.New(m.db)
+	defer policy.Watch(authorization.MonitorPrincipal, serverID, cancel, permission, "secrets.use")()
+	if !policy.All(authorization.MonitorPrincipal, serverID, permission, "secrets.use") {
+		return "", errors.New("monitor access revoked")
+	}
+	out, err := nexusssh.Run(ctx, client, command, nil, 30*time.Second)
+	if err != nil {
+		return "", err
+	}
+	if !policy.All(authorization.MonitorPrincipal, serverID, permission, "secrets.use") {
+		return "", errors.New("monitor access revoked")
+	}
+	return out, nil
 }

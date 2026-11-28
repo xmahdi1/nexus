@@ -1,8 +1,11 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -52,13 +55,31 @@ var ufwRuleRe = regexp.MustCompile(`^\[ *(\d+)\]\s+(\S+.*?)\s+(ALLOW|DENY|REJECT
 
 var portRe = regexp.MustCompile(`^[0-9]{1,5}(:[0-9]{1,5})?(/(tcp|udp))?$`)
 
-var fromRe = regexp.MustCompile(`^(Anywhere|[0-9a-fA-F:.]+(/[0-9]{1,3})?)$`)
-
-func validPort(p string) bool { return portRe.MatchString(p) }
-func validFrom(f string) bool { return f == "" || fromRe.MatchString(f) }
-
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+func validPort(p string) bool {
+	if !portRe.MatchString(p) {
+		return false
+	}
+	value, protocol, _ := strings.Cut(p, "/")
+	low, high, ranged := strings.Cut(value, ":")
+	first, _ := strconv.Atoi(low)
+	if first < 1 || first > 65535 {
+		return false
+	}
+	if ranged {
+		last, _ := strconv.Atoi(high)
+		return protocol != "" && last >= first && last <= 65535
+	}
+	return true
+}
+func validFrom(f string) bool {
+	if f == "" || f == "Anywhere" {
+		return true
+	}
+	if strings.Contains(f, "/") {
+		_, _, err := net.ParseCIDR(f)
+		return err == nil
+	}
+	return net.ParseIP(f) != nil
 }
 
 func parseUFWOutput(output string) (string, []FirewallRule) {
@@ -132,7 +153,7 @@ func parsePorts(output string) []OpenPort {
 	return ports
 }
 
-func (h *FirewallHandler) connect(serverID string) (*gossh.Client, error) {
+func (h *FirewallHandler) connect(ctx context.Context, serverID string) (*gossh.Client, error) {
 	var srv models.Server
 	if err := h.db.First(&srv, "id = ?", serverID).Error; err != nil {
 		return nil, fmt.Errorf("server not found")
@@ -141,7 +162,7 @@ func (h *FirewallHandler) connect(serverID string) (*gossh.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return h.pool.Get(nexusssh.ServerConfig{
+	return h.pool.GetContext(ctx, nexusssh.ServerConfig{
 		ID:      srv.ID,
 		Host:    srv.Host,
 		Port:    srv.Port,
@@ -150,24 +171,23 @@ func (h *FirewallHandler) connect(serverID string) (*gossh.Client, error) {
 	})
 }
 
-func fwRun(client *gossh.Client, cmd string) (string, error) {
-	sess, err := client.NewSession()
-	if err != nil {
-		return "", err
-	}
-	defer sess.Close()
-	out, err := sess.Output(cmd)
-	return strings.TrimSpace(string(out)), err
+func fwRun(ctx context.Context, client *gossh.Client, cmd string, input io.Reader) (string, error) {
+	out, err := nexusssh.Run(ctx, client, cmd, input, nexusssh.CommandTimeout)
+	return strings.TrimSpace(out), err
 }
 
 func (h *FirewallHandler) Status(w http.ResponseWriter, r *http.Request) {
-	client, err := h.connect(chi.URLParam(r, "id"))
+	client, err := h.connect(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
 		return
 	}
 
-	ufwOut, _ := fwRun(client, `ufw status numbered 2>&1 || echo '__UFW_MISSING__'`)
+	ufwOut, err := fwRun(r.Context(), client, `if command -v ufw >/dev/null 2>&1; then ufw status numbered 2>&1; else echo '__UFW_MISSING__'; fi`, nil)
+	if err != nil {
+		writeErr(w, "Firewall status unavailable.", "remote_error", 502)
+		return
+	}
 	available := !strings.Contains(ufwOut, "__UFW_MISSING__") && !strings.Contains(ufwOut, "command not found")
 
 	result := FirewallStatus{
@@ -182,9 +202,10 @@ func (h *FirewallHandler) Status(w http.ResponseWriter, r *http.Request) {
 
 	portScript := `ss -tlnp 2>/dev/null | grep 'LISTEN' | while IFS= read -r line; do port=$(printf '%s' "$line" | grep -oP ':\K\d+(?=\s)' | head -1); [ -z "$port" ] && continue; addr=$(printf '%s' "$line" | grep -oP '\S*:\d+(?=\s)' | head -1); proc=$(printf '%s' "$line" | grep -oP '"\K[^"]+(?=")' | head -1); pid=$(printf '%s' "$line" | grep -oP 'pid=\K\d+' | head -1); cmd=""; [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] && cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | head -c 80 | tr -d '\n'); printf 'tcp|%s|%s|%s|%s\n' "$port" "$addr" "$proc" "$cmd"; done`
 
-	portData, portErr := fwRun(client, portScript)
+	portData, portErr := fwRun(r.Context(), client, portScript, nil)
 	if portErr != nil {
-		fmt.Printf("[firewall] port script error: %v\n", portErr)
+		writeErr(w, "Listener status unavailable.", "remote_error", 502)
+		return
 	} else if portData != "" {
 		result.Ports = parsePorts(portData)
 	}
@@ -194,12 +215,12 @@ func (h *FirewallHandler) Status(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *FirewallHandler) Enable(w http.ResponseWriter, r *http.Request) {
-	client, err := h.connect(chi.URLParam(r, "id"))
+	client, err := h.connect(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
 		return
 	}
-	if _, err = fwRun(client, `ufw --force enable 2>&1`); err != nil {
+	if _, err = fwRun(r.Context(), client, `ufw --force enable 2>&1`, nil); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
@@ -208,12 +229,12 @@ func (h *FirewallHandler) Enable(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *FirewallHandler) Disable(w http.ResponseWriter, r *http.Request) {
-	client, err := h.connect(chi.URLParam(r, "id"))
+	client, err := h.connect(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
 		return
 	}
-	if _, err = fwRun(client, `ufw --force disable 2>&1`); err != nil {
+	if _, err = fwRun(r.Context(), client, `ufw --force disable 2>&1`, nil); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
@@ -226,6 +247,16 @@ type addRuleInput struct {
 	Action string `json:"action"`
 	From   string `json:"from"`
 }
+
+const addFirewallRule = `IFS= read -r action && IFS= read -r port && IFS= read -r source || exit 1
+if [ -z "$source" ]; then
+  exec ufw "$action" "$port"
+fi
+case "$port" in
+  */*) set -- proto "${port#*/}"; port=${port%/*} ;;
+  *) set -- ;;
+esac
+exec ufw "$action" from "$source" to any port "$port" "$@"`
 
 func (h *FirewallHandler) AddRule(w http.ResponseWriter, r *http.Request) {
 	var input addRuleInput
@@ -245,18 +276,17 @@ func (h *FirewallHandler) AddRule(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid from address"}`, http.StatusBadRequest)
 		return
 	}
-	client, err := h.connect(chi.URLParam(r, "id"))
+	client, err := h.connect(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
 		return
 	}
-	var cmd string
-	if input.From != "" && input.From != "Anywhere" {
-		cmd = fmt.Sprintf("ufw %s from %s to any port %s 2>&1", input.Action, shellQuote(input.From), shellQuote(input.Port))
-	} else {
-		cmd = fmt.Sprintf("ufw %s %s 2>&1", input.Action, shellQuote(input.Port))
+	source := input.From
+	if source == "Anywhere" {
+		source = ""
 	}
-	if _, err = fwRun(client, cmd); err != nil {
+	arguments := strings.NewReader(input.Action + "\n" + input.Port + "\n" + source + "\n")
+	if _, err = fwRun(r.Context(), client, addFirewallRule, arguments); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
@@ -265,17 +295,19 @@ func (h *FirewallHandler) AddRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *FirewallHandler) DeleteRule(w http.ResponseWriter, r *http.Request) {
-	client, err := h.connect(chi.URLParam(r, "id"))
+	client, err := h.connect(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
 		return
 	}
 	n := chi.URLParam(r, "n")
-	if _, err := strconv.Atoi(n); err != nil {
+	number, err := strconv.Atoi(n)
+	if err != nil || number < 1 {
 		http.Error(w, `{"error":"rule number must be numeric"}`, http.StatusBadRequest)
 		return
 	}
-	if _, err = fwRun(client, fmt.Sprintf("ufw --force delete %s 2>&1", n)); err != nil {
+	arguments := strings.NewReader(strconv.Itoa(number) + "\n")
+	if _, err = fwRun(r.Context(), client, `IFS= read -r number && exec ufw --force delete "$number"`, arguments); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}

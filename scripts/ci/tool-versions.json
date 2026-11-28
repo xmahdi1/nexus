@@ -1,0 +1,14 @@
+{
+  "go": "1.27.4",
+  "node": "22.20.0",
+  "python": "3.14.4",
+  "govulncheck": "v1.10.0",
+  "gitleaks": "v8.30.0",
+  "staticcheck": "v0.8.2",
+  "actionlint": "v1.7.12",
+  "gosec": "v2.30.0",
+  "trivy": "v0.76.2",
+  "syft": "v1.57.2",
+  "ruff": "0.17.6",
+  "shfmt": "v3.12.0"
+}
