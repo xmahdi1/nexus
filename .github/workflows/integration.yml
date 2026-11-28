@@ -1,7 +1,7 @@
 name: Integration
 on:
   push:
-    branches: [main, nexusv2, chore/nexus-2-public-baseline]
+    branches: [main]
     paths:
       - 'nexus/**'
       - 'nexus-vue/**'

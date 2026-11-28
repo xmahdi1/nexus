@@ -1,9 +1,9 @@
 name: CI
 on:
   pull_request:
-    branches: [main, nexusv2]
+    branches: [main]
   push:
-    branches: [main, nexusv2, 'feature/**', 'fix/**', 'chore/**']
+    branches: [main, 'feature/**', 'fix/**', 'chore/**']
   workflow_dispatch:
 permissions:
   contents: read
@@ -84,6 +84,7 @@ jobs:
           python -m ruff format --check scripts
           go run mvdan.cc/sh/v3/cmd/shfmt@v3.12.0 -d -i 2 -ci -sr scripts/*_lab/entrypoint.sh
           python scripts/ci/test_export_source.py
+          python scripts/ci/test_release.py
           python scripts/ci/validate_compose.py
           python scripts/deploy_test.py
           python scripts/ansible_collections_test.py

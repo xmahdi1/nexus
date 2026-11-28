@@ -1541,6 +1541,11 @@ export const api = {
     inspect: (id: string, token: string) =>
       request<VaultObservation>('POST', `/servers/${encodeURIComponent(id)}/vault/inspect`, { token }),
   },
+  version: () =>
+    request<{ version: string; commit?: string; built?: string; os: string; arch: string }>(
+      'GET',
+      '/version',
+    ),
   features: () =>
     request<{
       backups: boolean;

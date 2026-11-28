@@ -185,6 +185,7 @@ func init() {
 	register("POST", "/api/automation/ansible/tokens", "collection", "ansible.inventory.read servers.read")
 	register("DELETE", "/api/automation/ansible/tokens/{tokenId}", "collection", "ansible.inventory.read servers.read")
 	self("GET", "/api/features")
+	self("GET", "/api/version")
 	for _, action := range remoteaction.Catalog() {
 		register("POST", "/api/servers/{id}/operations/"+action.Route, "server", strings.Join(action.Permissions, " "))
 	}
